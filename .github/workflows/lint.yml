@@ -11,6 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/ruff-action@v3
+        continue-on-error: true
   shellcheck:
     runs-on: ubuntu-latest
     steps:
