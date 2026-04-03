@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "snmp_switch"
-version = "0.0.17"
+name = "fpgas-online-poe"
+version = "0.1.0"
 authors = [
   { name="Roman M.", email="roman@typethink.com" },
   { name="Carl Karsten", email="carl@NextDayVideo.com" },
@@ -28,4 +28,7 @@ cli = [
   # "snmpclitools",
 ]
 [project.urls]
-Repository =  "https://github.com/CarlFK/pib"
+Repository = "https://github.com/fpgas-online/fpgas.online-poe"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/snmp_switch"]
