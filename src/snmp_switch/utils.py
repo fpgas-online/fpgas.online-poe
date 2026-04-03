@@ -1,12 +1,7 @@
 import argparse
 import asyncio
-import sys
 import os
-
 from pprint import pprint
-from time import sleep
-
-import pysnmp
 
 from pysnmp.hlapi import v3arch
 from pysnmp.proto import rfc1902
@@ -243,7 +238,8 @@ def main2(args):
     params['port'] = args.port
 
     o=asyncio.run( snmp_get_state(**params) )
-    if args.verbose: pprint(o)
+    if args.verbose:
+        pprint(o)
 
     i = transform_ret(o)
     state={1:'on',2:'off'}[i]
@@ -251,7 +247,8 @@ def main2(args):
 
     if args.state is not None:
         o=asyncio.run( snmp_set_state(**params, state=args.state) )
-        if args.verbose: pprint(o)
+        if args.verbose:
+            pprint(o)
         i = transform_ret(o)
         state={1:'on',2:'off'}[i]
         print(f"{args.port=} {state=}")

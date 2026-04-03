@@ -1,24 +1,17 @@
 
-import asyncio
 import json
 import time
 
-from pprint import pprint
-
-from asgiref.sync import sync_to_async
-
-from django.shortcuts import render
-from django.http import HttpResponse
-from django.views.decorators.csrf import csrf_exempt
-
-from pysnmp import hlapi
-
-from snmp_switch.utils import mk_params, snmp_get_state, snmp_set_state
+from asgiref.sync import async_to_sync
 
 # so we can send the browser a message when the power goes off and on:
 # tangle up this code with the django-connect web socket code :(
 from channels.layers import get_channel_layer
-from asgiref.sync import async_to_sync
+from django.http import HttpResponse
+from django.views.decorators.csrf import csrf_exempt
+
+from snmp_switch.utils import mk_params, snmp_get_state, snmp_set_state
+
 
 def notify_dcws(port, gs, state):
 
