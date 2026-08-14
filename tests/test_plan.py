@@ -1,7 +1,12 @@
 from netgear_switch.models import VLANInfo, VlanMode
 
 from switch_setup.plan import (
-    OWN_RANGE, DesiredState, SwitchSpec, desired_state, diff, hostname, vlan_id,
+    OWN_RANGE,
+    SwitchSpec,
+    desired_state,
+    diff,
+    hostname,
+    vlan_id,
 )
 
 SPECS = [
