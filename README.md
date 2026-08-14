@@ -53,6 +53,44 @@ nginx/              nginx location config for the web UI
 pyproject.toml      Package configuration (hatchling build)
 ```
 
+## fpgas-switch-setup
+
+Converges a Netgear PoE switch's VLAN config (VLAN-per-port isolation for the
+FPGA network) to the desired state derived from a YAML `switches:` config —
+the same schema as the infra repo's host_vars `switches:` list (keys:
+`index, model, mgmt_host, access_ports, gateway_trunk_port,
+downstream_trunk_ports, house_uplink_port`).
+
+```
+fpgas-switch-setup --config FILE --switch N [--apply] [--community STR] [--host HOST]
+```
+
+- `--config FILE` -- path to the YAML config (required)
+- `--switch N` -- the `index` of the switch to converge, from `switches:` (required)
+- `--apply` -- execute the pending actions; omitted (check mode) only reports them
+- `--community STR` -- SNMP community (read and write); defaults to env `FPGAS_SWITCH_COMMUNITY`
+- `--host HOST` -- override the config's `mgmt_host` for this run
+
+Check mode (the default) prints each pending action and never writes to the
+switch. Only VLANs 2101-2348 and the owned ports' VLAN 1 membership are ever
+touched.
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| `0` | In sync (check mode, nothing pending) or applied cleanly |
+| `2` | Drift found in check mode (nothing was written) -- pairs with Ansible's `changed_when: rc == 2` |
+| `1` | Error (bad config, missing community, etc.) |
+
+Example, against a local `ngsw serve` mock:
+
+```bash
+ngsw serve --model gsm7252ps --port 1610 &
+FPGAS_SWITCH_COMMUNITY=public fpgas-switch-setup \
+  --config switches.yml --switch 2 --host 127.0.0.1:1610
+```
+
 ## Linting
 
 - **ruff**: blocking
