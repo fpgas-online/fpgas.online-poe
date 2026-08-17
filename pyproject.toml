@@ -11,7 +11,7 @@ authors = [
 ]
 description = "Turn it off and on again"
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -21,14 +21,29 @@ classifiers = [
 dependencies=[
     'pysnmp',
     'django',
+    'python-netgear-switch-library',
+    'pyyaml',
 ]
 
 [project.optional-dependencies]
 cli = [
   # "snmpclitools",
 ]
+
+[project.scripts]
+fpgas-switch-setup = "switch_setup.cli:main"
+
 [project.urls]
 Repository = "https://github.com/fpgas-online/fpgas.online-poe"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/snmp_switch"]
+packages = ["src/snmp_switch", "src/switch_setup"]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv]
+package = true
