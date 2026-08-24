@@ -29,7 +29,8 @@ def test_formulas():
 def test_desired_state_switch1():
     d = desired_state(SPECS, 1)
     assert d.vlans[2107] == "pi-sw1-p7"
-    assert set(d.vlans) == set(range(2101, 2149))
+    # own block (2101-2148) PLUS switch 2's block (2201-2248) as transit VLANs
+    assert set(d.vlans) == set(range(2101, 2149)) | set(range(2201, 2249))
     assert d.untagged[7] == 2107 and d.pvids[7] == 2107
     # gateway trunk carries own block AND switch 2's block
     assert d.tagged[49] == frozenset(range(2101, 2149)) | frozenset(range(2201, 2249))
@@ -44,6 +45,25 @@ def test_desired_state_switch2_trunks():
     d = desired_state(SPECS, 2)
     assert d.tagged[49] == frozenset(range(2201, 2249))
     assert d.tagged[50] == frozenset()  # no switch 3 configured
+
+
+def test_transit_vlans_are_created_before_being_tagged():
+    # A switch with another switch "behind" it must CREATE the downstream
+    # block as transit VLANs before tagging them on its trunk/downlink ports.
+    # Without this, set_vlan_membership fails "VLAN 2201 does not exist" on the
+    # first behind VLAN -- regression against the live gsm7252ps + s3300 chain.
+    d = desired_state(SPECS, 1)
+    for vid in range(2201, 2249):
+        assert d.vlans[vid] == f"transit-{vid}"  # named as transit, not a Pi
+    assert d.vlans[2107] == "pi-sw1-p7"           # own block keeps Pi names
+
+    current = [vinfo(1, "default", member=range(1, 53), untagged=range(1, 53))]
+    actions = diff(current, {p: 1 for p in range(1, 53)}, d)
+    # the transit VLAN is created, and created BEFORE it is tagged on a trunk
+    assert ("create_vlan", 2201, "transit-2201") in actions
+    assert ("membership", 2201, 49, VlanMode.TAGGED) in actions
+    assert (actions.index(("create_vlan", 2201, "transit-2201"))
+            < actions.index(("membership", 2201, 49, VlanMode.TAGGED)))
 
 
 def vinfo(vid, name="", member=(), tagged=(), untagged=()):
@@ -68,6 +88,20 @@ def test_diff_from_factory_default():
             < actions.index(("membership", 1, 7, VlanMode.EXCLUDED)))
     # house uplink (52) untouched: no action mentions port 52
     assert not [a for a in actions if a[0] == "membership" and a[2] == 52]
+
+
+def test_diff_adds_egress_when_untagged_default_is_all_ports():
+    # Some models (gsm7252ps) report a freshly created VLAN with EVERY port
+    # already in the untagged bitmap but NONE in the egress/member set. Checking
+    # untagged_ports alone wrongly concludes the access port is already a member
+    # and never adds it to egress, so the port cannot receive frames (the DHCP
+    # OFFER never egresses to it). The diff must still emit the untagged
+    # membership -- regression: pi-sw1-p9 stuck at DHCPOFFER on the live GSM.
+    d = desired_state(SPECS, 2)
+    # VLAN 2207 exists; port 7 is in the untagged bitmap but is NOT a member
+    current = [vinfo(2207, "pi-sw2-p7", member=(49,), untagged=range(1, 53))]
+    actions = diff(current, {}, d)
+    assert ("membership", 2207, 7, VlanMode.UNTAGGED) in actions
 
 
 def test_diff_idempotent_and_prunes_stale():
