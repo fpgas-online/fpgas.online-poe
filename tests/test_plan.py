@@ -90,6 +90,20 @@ def test_diff_from_factory_default():
     assert not [a for a in actions if a[0] == "membership" and a[2] == 52]
 
 
+def test_diff_adds_egress_when_untagged_default_is_all_ports():
+    # Some models (gsm7252ps) report a freshly created VLAN with EVERY port
+    # already in the untagged bitmap but NONE in the egress/member set. Checking
+    # untagged_ports alone wrongly concludes the access port is already a member
+    # and never adds it to egress, so the port cannot receive frames (the DHCP
+    # OFFER never egresses to it). The diff must still emit the untagged
+    # membership -- regression: pi-sw1-p9 stuck at DHCPOFFER on the live GSM.
+    d = desired_state(SPECS, 2)
+    # VLAN 2207 exists; port 7 is in the untagged bitmap but is NOT a member
+    current = [vinfo(2207, "pi-sw2-p7", member=(49,), untagged=range(1, 53))]
+    actions = diff(current, {}, d)
+    assert ("membership", 2207, 7, VlanMode.UNTAGGED) in actions
+
+
 def test_diff_idempotent_and_prunes_stale():
     d = desired_state(SPECS, 2)
     current = [vinfo(1, "default", member=(49, 50, 52), untagged=(49, 50, 52))]

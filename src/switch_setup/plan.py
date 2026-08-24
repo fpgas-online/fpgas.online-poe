@@ -102,7 +102,14 @@ def diff(current_vlans: list[VLANInfo], current_pvids: dict[int, int],
 
     for port, vid in sorted(desired.untagged.items()):
         cur = by_id.get(vid)
-        if cur is None or port not in cur.untagged_ports:
+        # A port is a real untagged member only when it is in BOTH the egress
+        # (member) set AND the untagged set. Some models (gsm7252ps) default
+        # every VLAN's untagged bitmap to all-ports while the egress bitmap is
+        # empty, so checking untagged_ports alone wrongly concludes the port is
+        # already a member and never adds it to egress -- leaving the access
+        # port unable to receive frames (the DHCP OFFER never egresses to it).
+        if (cur is None or port not in cur.member_ports
+                or port not in cur.untagged_ports):
             access.append(("membership", vid, port, VlanMode.UNTAGGED))
 
     for port, vid in sorted(desired.pvids.items()):
