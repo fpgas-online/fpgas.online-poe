@@ -47,8 +47,14 @@ def desired_state(specs: list[SwitchSpec], index: int) -> DesiredState:
     spec = next(s for s in specs if s.index == index)
     behind = frozenset().union(
         *[_block(s) for s in specs if s.index > index] or [frozenset()])
-    vlans = {vlan_id(index, p): hostname(index, p)
-             for p in range(1, spec.access_ports + 1)}
+    # This switch's own access VLANs (named for the Pi on each port) plus the
+    # "behind" transit VLANs. Every VLAN tagged onto a trunk/downlink port must
+    # exist on the switch first, so downstream switches' blocks are created here
+    # as transit VLANs -- otherwise set_vlan_membership fails with
+    # "VLAN <id> does not exist" on the first behind VLAN.
+    vlans = {vid: f"transit-{vid}" for vid in behind}
+    vlans.update({vlan_id(index, p): hostname(index, p)
+                  for p in range(1, spec.access_ports + 1)})
     tagged = {spec.gateway_trunk_port: _block(spec) | behind}
     for port in spec.downstream_trunk_ports:
         tagged[port] = behind
