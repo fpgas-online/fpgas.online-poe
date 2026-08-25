@@ -29,7 +29,14 @@ def test_formulas():
 def test_desired_state_switch1():
     d = desired_state(SPECS, 1)
     assert d.vlans[2107] == "pi-sw1-p7"
-    assert set(d.vlans) == set(range(2101, 2149))
+    # Own access block PLUS switch 2's block as transit VLANs: every VLAN
+    # tagged onto the gateway/downstream trunks must exist on this switch,
+    # and being in `vlans` also protects them from the stale-VLAN prune
+    # (2026-08-25 tweed rebuild B1-6: the old contract pruned 2201-2248
+    # from the gateway switch, then converge couldn't re-add trunk
+    # memberships to the now-missing VLANs).
+    assert set(d.vlans) == set(range(2101, 2149)) | set(range(2201, 2249))
+    assert d.vlans[2201] == "transit-2201"
     assert d.untagged[7] == 2107 and d.pvids[7] == 2107
     # gateway trunk carries own block AND switch 2's block
     assert d.tagged[49] == frozenset(range(2101, 2149)) | frozenset(range(2201, 2249))
