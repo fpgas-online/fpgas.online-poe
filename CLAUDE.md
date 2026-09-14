@@ -24,8 +24,11 @@ Installable as:
 
 ### Configuration
 
-Switch connection configured via environment variables (SNMP_SWITCH_HOST, SNMP_SWITCH_OID,
-SNMP_SWITCH_USERNAME, etc.). These are set by the infra repo's `snmp` ansible role.
+Switch connection configured via environment variables, in one of two shapes (see README):
+`FPGAS_SWITCHES_CONFIG` + `FPGAS_SWITCH_COMMUNITY[_<index>]` for the per-port-VLAN switches
+(netgear_switch, SNMP v2c), or the legacy `SNMP_SWITCH_HOST`, `SNMP_SWITCH_OID`,
+`SNMP_SWITCH_USERNAME`, etc. for a single SNMPv3 switch. These are set by the infra repo's
+`site` role (`snmp.yml`).
 
 ### Integration
 

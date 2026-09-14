@@ -29,7 +29,24 @@ pip install "fpgas-online-poe[cli] @ git+https://github.com/fpgas-online/fpgas.o
 
 ## Configuration
 
-The switch connection is configured via environment variables:
+The switch connection is configured via environment variables. There are two
+shapes; the first one found wins.
+
+### Per-port-VLAN switches (welland)
+
+The switches are the ones `fpgas-switch-setup` manages, spoken to over SNMP v2c
+through `netgear_switch`:
+
+| Variable | Description |
+|----------|-------------|
+| `FPGAS_SWITCHES_CONFIG` | Path to the `switches:` YAML infra renders (`/etc/fpgas/switches.yml`) |
+| `FPGAS_SWITCH_COMMUNITY_<index>` | SNMP write community for switch `<index>` |
+| `FPGAS_SWITCH_COMMUNITY` | Fallback community for every switch without its own |
+
+Requests carry `{"port": "42", "switch": 2}`; `switch` may be omitted when only
+one switch is configured. Needs the net-snmp CLI tools (apt: `snmp`) on the host.
+
+### Legacy single SNMPv3 switch (PS1)
 
 | Variable | Description |
 |----------|-------------|
