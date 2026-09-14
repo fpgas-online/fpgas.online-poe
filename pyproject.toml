@@ -23,6 +23,7 @@ dependencies=[
     'django',
     'python-netgear-switch-library',
     'pyyaml',
+    "channels>=4.3.2",
 ]
 
 [project.optional-dependencies]
