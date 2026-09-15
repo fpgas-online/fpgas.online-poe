@@ -9,6 +9,7 @@ so a restart costs at most one sweep of latency.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
@@ -39,6 +40,14 @@ class Watchdog:
         self.states: dict[Board, BoardState] = {}
         self.first_sweep = True
         self._switches: dict[int, object] = {}
+        # run_cycles fans cycle() out across threads, and two boards on the
+        # same switch in one sweep is the common case. Without this lock, two
+        # threads can both pass the "not cached yet" check before either
+        # assigns, each building its own SyncSwitch; one handle is then
+        # silently discarded and its connection leaked. Held across
+        # open_switch deliberately: handle creation is already effectively
+        # serial, and the lock is uncontended once a handle exists.
+        self._switch_lock = threading.Lock()
 
     # -- switch access ----------------------------------------------------
 
@@ -46,10 +55,11 @@ class Watchdog:
         return load_specs(self.cfg.switches_config)
 
     def switch(self, index: int):
-        if index not in self._switches:
-            spec = next(s for s in self.specs() if s.index == index)
-            self._switches[index] = open_switch(spec, community_for(index))
-        return self._switches[index]
+        with self._switch_lock:
+            if index not in self._switches:
+                spec = next(s for s in self.specs() if s.index == index)
+                self._switches[index] = open_switch(spec, community_for(index))
+            return self._switches[index]
 
     def enumerate(self) -> list[Board]:
         boards: list[Board] = []

@@ -2,6 +2,7 @@
 
 import logging
 import textwrap
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from netgear_switch.virtual.server import VirtualSwitch
@@ -69,6 +70,16 @@ def watchdog(config_path, probe):
 def poe_detect(wd, port):
     sw = wd.switch(2)
     return next(p for p in sw.get_poe() if p.port == port).detect.value
+
+
+def test_concurrent_cycles_share_one_switch_handle(config_path):
+    """run_cycles calls cycle() on several threads, and two boards on one
+    switch is the common case. Without a lock each thread can build its own
+    SyncSwitch and silently discard all but the last."""
+    wd = watchdog(config_path, all_ok())
+    with ThreadPoolExecutor(8) as pool:
+        handles = list(pool.map(lambda _: wd.switch(2), range(8)))
+    assert len({id(h) for h in handles}) == 1
 
 
 def test_a_sweep_finds_the_delivering_ports(config_path):
