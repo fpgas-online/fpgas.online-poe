@@ -1,0 +1,184 @@
+"""One whole sweep: enumerate, probe, decide, cycle, log."""
+
+import logging
+import textwrap
+
+import pytest
+from netgear_switch.virtual.server import VirtualSwitch
+
+from fleet_watchdog.cli import main
+from fleet_watchdog.config import load_config
+from fleet_watchdog.policy import Observation
+from fleet_watchdog.service import Watchdog
+
+DELIVERING = {44, 48}
+
+
+@pytest.fixture()
+def virtual_switch():
+    vs = VirtualSwitch("gsm7228ps")
+    vs.start()
+    yield vs
+    vs.stop()
+
+
+@pytest.fixture()
+def config_path(virtual_switch, tmp_path, monkeypatch):
+    switches = tmp_path / "switches.yml"
+    switches.write_text(textwrap.dedent(f"""
+        switches:
+          - index: 2
+            model: s3300
+            mgmt_host: {virtual_switch.host}:{virtual_switch.port}
+            access_ports: 48
+            gateway_trunk_port: 51
+            downstream_trunk_ports: []
+            house_uplink_port: 52
+    """))
+    watchdog = tmp_path / "watchdog.yml"
+    watchdog.write_text(textwrap.dedent(f"""
+        switches_config: {switches}
+        pib_network: "10.21"
+        ssh_key: /k
+        known_hosts: /kh
+        uptime_jitter_minutes: 0
+        poe_off_seconds: 30
+    """))
+    monkeypatch.setenv("FPGAS_SWITCH_COMMUNITY_2", virtual_switch.community)
+    return str(watchdog)
+
+
+def all_ok(uptime_s=3600.0, in_use=False):
+    def probe(board):
+        return Observation(board=board, ok=True, uptime_s=uptime_s, in_use=in_use, error=None)
+    return probe
+
+
+def all_dead(board_ports=None):
+    def probe(board):
+        if board_ports is None or board.port in board_ports:
+            return Observation(board=board, ok=False, uptime_s=None, in_use=False, error="timed out")
+        return Observation(board=board, ok=True, uptime_s=60.0, in_use=False, error=None)
+    return probe
+
+
+def watchdog(config_path, probe):
+    return Watchdog(load_config(config_path), probe=probe, sleep=lambda s: None)
+
+
+def poe_detect(wd, port):
+    sw = wd.switch(2)
+    return next(p for p in sw.get_poe() if p.port == port).detect.value
+
+
+def test_a_sweep_finds_the_delivering_ports(config_path):
+    wd = watchdog(config_path, all_ok())
+    d = wd.sweep()
+    assert d.occupied == len(DELIVERING)
+    assert d.failed == 0
+
+
+def test_the_first_sweep_cycles_nothing(config_path):
+    wd = watchdog(config_path, all_dead())
+    wd.sweep()
+    assert poe_detect(wd, 44) == "delivering"
+
+
+def test_a_board_failing_twice_is_cycled(config_path):
+    """Two boards occupied, one dead: one failure is under the breaker's count
+    floor of 3, so the breaker stays out of the way and the board is cycled.
+
+    Sweep 1 is the observe-only first sweep and counts failure 1. Sweep 2
+    counts failure 2, reaches the threshold and cycles.
+    """
+    wd = watchdog(config_path, all_dead({44}))
+    wd.sweep()
+    d = wd.sweep()
+    assert 44 in [b.port for b, _ in d.cycles]
+    assert poe_detect(wd, 44) == "delivering"  # off, dwell, back on
+
+
+def test_a_dry_run_decides_but_changes_nothing(config_path, monkeypatch):
+    wd = watchdog(config_path, all_dead({44}))
+    wd.sweep()
+    calls = []
+    monkeypatch.setattr(wd, "cycle", lambda board, reason: calls.append(board))
+    d = wd.sweep(dry_run=True)
+    assert 44 in [b.port for b, _ in d.cycles]
+    assert calls == []
+
+
+def test_a_cycled_board_starts_its_boot_grace(config_path):
+    wd = watchdog(config_path, all_dead({44}))
+    wd.sweep()
+    wd.sweep()
+    board = next(b for b in wd.states if b.port == 44)
+    assert wd.states[board].last_cycle is not None
+
+
+def test_an_uptime_cycle_happens_for_a_long_running_board(config_path):
+    wd = watchdog(config_path, all_ok(uptime_s=20 * 3600))
+    wd.sweep()
+    d = wd.sweep()
+    assert all(r.value == "uptime" for _, r in d.cycles)
+    assert len(d.cycles) == 2  # both occupied boards, cap is 2
+
+
+def test_a_sweep_logs_a_summary(config_path, caplog):
+    wd = watchdog(config_path, all_ok())
+    with caplog.at_level(logging.INFO):
+        wd.sweep()
+    assert any("occupied=2" in r.message for r in caplog.records)
+
+
+def test_a_cycle_is_logged_with_the_board_and_the_reason(config_path, caplog):
+    wd = watchdog(config_path, all_ok(uptime_s=20 * 3600))
+    wd.sweep()
+    with caplog.at_level(logging.WARNING):
+        wd.sweep()
+    assert any("pi-sw2-p44" in r.message and "uptime" in r.message for r in caplog.records)
+
+
+def test_a_switch_that_cannot_be_reached_does_not_kill_the_sweep(tmp_path, monkeypatch, caplog):
+    """If pointing at a closed port makes this slow (the SNMP client may retry
+    for tens of seconds), replace the unreachable host with
+    `monkeypatch.setattr(Watchdog, "switch", raises)` where `raises` throws
+    OSError. The behaviour under test is that one switch's failure is logged
+    and skipped, not how the failure is produced."""
+    switches = tmp_path / "switches.yml"
+    switches.write_text(textwrap.dedent("""
+        switches:
+          - index: 9
+            model: s3300
+            mgmt_host: 127.0.0.1:1
+            access_ports: 48
+            gateway_trunk_port: 51
+            downstream_trunk_ports: []
+            house_uplink_port: 52
+    """))
+    watchdog_yml = tmp_path / "watchdog.yml"
+    watchdog_yml.write_text(textwrap.dedent(f"""
+        switches_config: {switches}
+        pib_network: "10.21"
+        ssh_key: /k
+        known_hosts: /kh
+    """))
+    monkeypatch.setenv("FPGAS_SWITCH_COMMUNITY_9", "public")
+    wd = Watchdog(load_config(str(watchdog_yml)), probe=all_ok(), sleep=lambda s: None)
+    with caplog.at_level(logging.ERROR):
+        d = wd.sweep()
+    assert d.occupied == 0
+    assert any("switch 9" in r.message for r in caplog.records)
+
+
+def test_the_cli_runs_one_sweep_and_exits_zero(config_path, capsys):
+    rc = main([
+        "--config", config_path, "--once", "--dry-run",
+        "--probe-command", "true",
+    ])
+    assert rc == 0
+
+
+def test_the_cli_rejects_a_missing_config(tmp_path):
+    with pytest.raises(SystemExit):
+        main(["--config", str(tmp_path / "nope.yml"), "--once"])
