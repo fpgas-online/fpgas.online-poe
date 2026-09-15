@@ -2,6 +2,9 @@
 the per-sweep stagger."""
 
 import dataclasses
+import os
+import subprocess
+import sys
 
 from fleet_watchdog.config import WatchdogConfig
 from fleet_watchdog.policy import BoardState, Observation, Reason, decide, jitter_seconds
@@ -24,8 +27,30 @@ def obs(board, uptime_h, in_use=False):
     )
 
 
-def test_jitter_is_stable_for_a_board():
+def test_jitter_is_stable_within_a_process():
     assert jitter_seconds(2, 42, 60) == jitter_seconds(2, 42, 60)
+
+
+def _jitter_in_subprocess(seed):
+    env = {**os.environ, "PYTHONHASHSEED": seed}
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from fleet_watchdog.policy import jitter_seconds; print(jitter_seconds(2, 42, 60))",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    return out.stdout.strip()
+
+
+def test_jitter_survives_a_process_restart():
+    """crc32, not hash(): Python salts string hashes per process, and the unit
+    runs with Restart=always, so a restart must not re-slot every board."""
+    assert _jitter_in_subprocess("1") == _jitter_in_subprocess("2")
 
 
 def test_jitter_differs_between_boards():
@@ -80,6 +105,36 @@ def test_an_in_use_board_past_the_hard_cap_is_cycled_anyway():
     )
     assert d.cycles == ((b, Reason.UPTIME),)
     assert d.deferred == ()
+
+
+def test_a_board_at_exactly_the_hard_cap_is_cycled_not_deferred():
+    """Pins the < vs <= boundary in _scheduled: obs.uptime_s < hard_cap is the
+    deferral test, so a board exactly AT the cap fails it and is cycled."""
+    b = make_board(2, 42, "10.21")
+    d = decide(
+        [obs(b, 12.0, in_use=True)], {b: BoardState()}, cfg(uptime_jitter_minutes=0), NOW, False
+    )
+    assert d.cycles == ((b, Reason.UPTIME),)
+    assert d.deferred == ()
+
+
+def test_the_hard_cap_still_respects_the_per_sweep_cap():
+    """Three in-use boards are all past the 12 h hard cap in one sweep, but
+    the default per-sweep cap is 2. _scheduled deliberately staggers even
+    hard-capped boards: exactly two go, the two with the longest uptime, and
+    the third is neither cycled nor dropped from the sweep's accounting (it
+    sorts to the front of the next sweep's candidates, so it waits only
+    minutes against a 12 h cap). This documents that behaviour so it cannot
+    change silently."""
+    bs = [make_board(2, p, "10.21") for p in range(1, 4)]
+    st = {b: BoardState() for b in bs}
+    obs_list = [obs(bs[0], 13.0, in_use=True), obs(bs[1], 15.0, in_use=True),
+                obs(bs[2], 14.0, in_use=True)]
+    d = decide(obs_list, st, cfg(uptime_jitter_minutes=0), NOW, False)
+    assert d.cycles == ((bs[1], Reason.UPTIME), (bs[2], Reason.UPTIME))
+    assert d.deferred == ()
+    assert d.in_use == 3
+    assert d.occupied == 3
 
 
 def test_scheduled_cycles_are_capped_per_sweep():
