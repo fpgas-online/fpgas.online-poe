@@ -1,9 +1,9 @@
 """Which boards exist, and how the watchdog talks to their switch.
 
 Board identity reproduces the formulas in the infra repo's
-ansible/filter_plugins/port_vlan_map.py, which is the source of truth for the
-VLAN-per-port scheme: IPv4 <pib_network>.<switch>.<port>, hostname
-pi-sw<switch>-p<port>.
+ansible/filter_plugins/port_vlans.py (registers the port_vlan_map filter),
+which is the source of truth for the VLAN-per-port scheme: IPv4
+<pib_network>.<switch>.<port>, hostname pi-sw<switch>-p<port>.
 """
 
 from __future__ import annotations
