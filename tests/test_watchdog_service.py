@@ -182,6 +182,32 @@ def test_a_switch_that_cannot_be_reached_does_not_kill_the_sweep(tmp_path, monke
     assert any("switch 9" in r.message for r in caplog.records)
 
 
+def test_dry_run_can_report_cycling_when_boards_warrant_it(config_path, monkeypatch, caplog):
+    """cli.py must clear first_sweep before a dry-run sweep: policy.decide()
+    returns early on first_sweep, before building any cycle list, and a fresh
+    Watchdog always starts first_sweep=True. Left alone, `--once --dry-run`
+    could never propose a cycle, even though the deployment procedure and the
+    role README tell an operator to dry-run and read what it proposes.
+
+    caplog, not capsys: main() calls logging.basicConfig(stream=sys.stdout),
+    which is a process-wide no-op after the first call in this test session,
+    so it can end up bound to an earlier test's capsys stream rather than
+    this one's. caplog attaches to the logger itself and sees every record
+    regardless.
+    """
+    monkeypatch.setattr(
+        "fleet_watchdog.probe.SshProbe.__call__",
+        lambda self, board: Observation(
+            board=board, ok=True, uptime_s=20 * 3600, in_use=False, error=None
+        ),
+    )
+    with caplog.at_level(logging.INFO):
+        rc = main(["--config", config_path, "--once", "--dry-run"])
+    assert rc == 0
+    # both occupied boards are well past max_uptime_hours
+    assert any("cycling=2" in r.message for r in caplog.records)
+
+
 def test_the_cli_runs_one_sweep_and_exits_zero(config_path, capsys):
     rc = main([
         "--config", config_path, "--once", "--dry-run",

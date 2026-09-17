@@ -40,6 +40,15 @@ def main(argv: list[str] | None = None) -> int:
     probe = _stub_probe if args.probe_command == "true" else None
     wd = Watchdog(cfg, probe=probe)
     if args.once:
+        if args.dry_run:
+            # policy.decide() returns early on first_sweep, before building any
+            # cycle list, and a fresh Watchdog always starts first_sweep=True.
+            # Left alone, `--once --dry-run` could never report a proposed
+            # cycle, which is exactly what an operator is told to read before
+            # enabling the service (see the role README). Cycling nothing is
+            # safe by construction on a dry run, so pretend this is a steady
+            # -state sweep for the purposes of the report.
+            wd.first_sweep = False
         wd.sweep(dry_run=args.dry_run)
         return 0
     if args.dry_run:
