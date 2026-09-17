@@ -150,6 +150,19 @@ def test_a_cycle_is_logged_with_the_board_and_the_reason(config_path, caplog):
     assert any("pi-sw2-p44" in r.message and "uptime" in r.message for r in caplog.records)
 
 
+def test_a_failed_cycle_still_starts_its_boot_grace(config_path, monkeypatch):
+    """The finally in cycle() must run even when cycle_port raises, so a port
+    that will not come back is not hammered every sweep."""
+    wd = watchdog(config_path, all_ok())
+    monkeypatch.setattr(
+        "fleet_watchdog.service.cycle_port",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("dwell interrupted")),
+    )
+    board = next(b for b in wd.enumerate() if b.port == 44)
+    wd.cycle(board, Reason.UNREACHABLE)
+    assert wd.states[board].last_cycle is not None
+
+
 def test_a_failed_cycle_attempts_to_restore_power(config_path, monkeypatch, caplog):
     """A cycle that dies between the off and the on leaves the port dark, and
     a port that is not DELIVERING is never enumerated again (occupied_boards
@@ -202,6 +215,31 @@ def test_run_exits_immediately_when_shutdown_is_already_set(config_path):
     wd.sweep = lambda dry_run=False: calls.append(1)
     wd.run()
     assert calls == []
+
+
+def test_run_sleeps_the_remaining_interval_and_survives_a_failed_sweep(config_path):
+    """Sweeps never overlap (the loop sleeps max(0, interval - elapsed)), and
+    an exception in one sweep does not end the loop: only the shutdown flag
+    does."""
+    wd = watchdog(config_path, all_ok())
+    clocks = iter([0.0, 5.0, 12.0])
+    wd.clock = lambda: next(clocks)
+    sleeps = []
+    wd.sleep = lambda s: sleeps.append(s)
+
+    calls = []
+
+    def fake_sweep(dry_run=False):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        wd._shutdown = True
+
+    wd.sweep = fake_sweep
+    wd.run()
+
+    assert len(calls) == 2  # the exception in sweep 1 did not end the loop
+    assert sleeps == [pytest.approx(wd.cfg.interval - 5.0)]
 
 
 def test_a_switch_that_cannot_be_reached_does_not_kill_the_sweep(tmp_path, monkeypatch, caplog):

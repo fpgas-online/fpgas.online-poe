@@ -107,6 +107,30 @@ def test_boards_carry_their_ip_and_hostname(spec, virtual_switch):
     assert boards[48].hostname == "pi-sw2-p48"
 
 
+def test_a_protected_port_falling_inside_access_ports_is_still_excluded(spec, virtual_switch):
+    """In both this fixture and the real inventory every trunk/uplink port sits
+    outside access_ports, so the protected_ports() subtraction in
+    occupied_boards is never actually exercised by port-range alone. The sw2
+    inventory comment ("recable to 1-40 later") says that will not stay true,
+    so pin the behaviour now: a delivering, in-range port that is also a
+    protected port (here, the gateway trunk aimed at port 44, one of the
+    virtual switch's two delivering ports) must not come back as occupied."""
+
+    class Spec:
+        index = spec.index
+        model = spec.model
+        mgmt_host = spec.mgmt_host
+        access_ports = 48
+        gateway_trunk_port = 44
+        downstream_trunk_ports = ()
+        house_uplink_port = 52
+
+    trunk_inside_range = Spec()
+    sw = open_switch(trunk_inside_range, virtual_switch.community)
+    boards = occupied_boards(sw, trunk_inside_range, frozenset(), "10.21")
+    assert {b.port for b in boards} == {48}
+
+
 def test_the_switch_refuses_to_touch_a_protected_port(spec, virtual_switch):
     sw = open_switch(spec, virtual_switch.community)
     with pytest.raises(ProtectedPortError):
