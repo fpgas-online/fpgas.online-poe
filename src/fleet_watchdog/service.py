@@ -9,6 +9,7 @@ so a restart costs at most one sweep of latency.
 from __future__ import annotations
 
 import logging
+import signal
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -40,6 +41,12 @@ class Watchdog:
         self.states: dict[Board, BoardState] = {}
         self.first_sweep = True
         self._switches: dict[int, object] = {}
+        # Set by _request_shutdown (installed on SIGTERM/SIGINT in run()) and
+        # checked between sweeps. The role's own handler restarts this service
+        # whenever the config, env file or unit changes, so a routine converge
+        # can send SIGTERM mid-dwell; without this the loop would just die
+        # there instead of finishing the sweep in progress and exiting clean.
+        self._shutdown = False
         # run_cycles fans cycle() out across threads, and two boards on the
         # same switch in one sweep is the common case. Without this lock, two
         # threads can both pass the "not cached yet" check before either
@@ -144,6 +151,20 @@ class Watchdog:
             )
         except Exception as exc:  # noqa: BLE001 - includes CycleError
             log.error("%s cycle failed: %s", board, exc)
+            # A cycle that dies between the off and the on leaves the port
+            # dark, and a port that is not DELIVERING is never enumerated
+            # again (occupied_boards only counts DELIVERING ports), so nothing
+            # would ever turn it back on. Try once more before giving up.
+            try:
+                self.switch(board.switch).set_poe(board.port, True)
+                log.error("%s power restored after the failed cycle", board)
+            except Exception as restore_exc:  # noqa: BLE001
+                log.error(
+                    "%s COULD NOT RESTORE POWER (%s); the port may be left "
+                    "off. Recover with the board page's Reset button or "
+                    "fpgas-switch PoE control.",
+                    board, restore_exc,
+                )
         finally:
             # The grace starts whether or not the cycle completed. A port that
             # failed to come back must not be hammered every sweep either.
@@ -151,19 +172,30 @@ class Watchdog:
 
     # -- the loop ---------------------------------------------------------
 
+    def _request_shutdown(self, signum, frame) -> None:  # noqa: ARG002 - signal handler signature
+        log.info("received signal %d, stopping after the current sweep", signum)
+        self._shutdown = True
+
     def run(self) -> None:
+        # Installed here, not __init__: signal.signal only works from the
+        # main thread, and run() is where that assumption actually holds.
+        signal.signal(signal.SIGTERM, self._request_shutdown)
+        signal.signal(signal.SIGINT, self._request_shutdown)
         log.info(
             "fleet watchdog starting: interval=%.0fs threshold=%d off=%.0fs "
             "uptime=%.0fh cap=%.0fh; the first sweep only observes",
             self.cfg.interval, self.cfg.fail_threshold, self.cfg.poe_off_seconds,
             self.cfg.max_uptime_hours, self.cfg.hard_cap_hours,
         )
-        while True:
+        while not self._shutdown:
             started = self.clock()
             try:
                 self.sweep()
             except Exception:  # noqa: BLE001 - the loop outlives any one sweep
                 log.exception("sweep failed")
+            if self._shutdown:
+                break
             # Sweeps never overlap. A sweep that overruns simply starts the
             # next one immediately rather than stacking.
             self.sleep(max(0.0, self.cfg.interval - (self.clock() - started)))
+        log.info("fleet watchdog stopping")

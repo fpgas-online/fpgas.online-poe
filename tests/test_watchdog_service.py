@@ -9,7 +9,7 @@ from netgear_switch.virtual.server import VirtualSwitch
 
 from fleet_watchdog.cli import main
 from fleet_watchdog.config import load_config
-from fleet_watchdog.policy import Observation
+from fleet_watchdog.policy import Observation, Reason
 from fleet_watchdog.service import Watchdog
 
 DELIVERING = {44, 48}
@@ -148,6 +148,60 @@ def test_a_cycle_is_logged_with_the_board_and_the_reason(config_path, caplog):
     with caplog.at_level(logging.WARNING):
         wd.sweep()
     assert any("pi-sw2-p44" in r.message and "uptime" in r.message for r in caplog.records)
+
+
+def test_a_failed_cycle_attempts_to_restore_power(config_path, monkeypatch, caplog):
+    """A cycle that dies between the off and the on leaves the port dark, and
+    a port that is not DELIVERING is never enumerated again (occupied_boards
+    only counts DELIVERING ports), so nothing would ever turn it back on. The
+    service must make a best-effort attempt to restore power."""
+    wd = watchdog(config_path, all_ok())
+    monkeypatch.setattr(
+        "fleet_watchdog.service.cycle_port",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("dwell interrupted")),
+    )
+    board = next(b for b in wd.enumerate() if b.port == 44)
+    with caplog.at_level(logging.ERROR):
+        wd.cycle(board, Reason.UNREACHABLE)
+    assert any("power restored after the failed cycle" in r.message for r in caplog.records)
+    assert poe_detect(wd, 44) == "delivering"
+
+
+def test_a_failed_cycle_that_cannot_restore_power_says_so(config_path, monkeypatch, caplog):
+    """When even the restore attempt fails, the operator needs a message that
+    says power may genuinely be off and how to recover it by hand."""
+    wd = watchdog(config_path, all_ok())
+    monkeypatch.setattr(
+        "fleet_watchdog.service.cycle_port",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("dwell interrupted")),
+    )
+    board = next(b for b in wd.enumerate() if b.port == 44)
+    sw = wd.switch(2)
+    monkeypatch.setattr(
+        sw, "set_poe", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("snmp down"))
+    )
+    with caplog.at_level(logging.ERROR):
+        wd.cycle(board, Reason.UNREACHABLE)
+    assert any("COULD NOT RESTORE POWER" in r.message for r in caplog.records)
+
+
+def test_the_signal_handler_sets_the_shutdown_flag(config_path):
+    wd = watchdog(config_path, all_ok())
+    assert wd._shutdown is False
+    wd._request_shutdown(15, None)  # SIGTERM
+    assert wd._shutdown is True
+
+
+def test_run_exits_immediately_when_shutdown_is_already_set(config_path):
+    """The role's own handler restarts this service on any config, env or
+    unit change, which sends SIGTERM. run() must actually stop, not just
+    record that it was asked to."""
+    wd = watchdog(config_path, all_ok())
+    wd._shutdown = True
+    calls = []
+    wd.sweep = lambda dry_run=False: calls.append(1)
+    wd.run()
+    assert calls == []
 
 
 def test_a_switch_that_cannot_be_reached_does_not_kill_the_sweep(tmp_path, monkeypatch, caplog):
