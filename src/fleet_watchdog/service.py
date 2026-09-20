@@ -228,7 +228,7 @@ class Watchdog:
             elif not decision.breaker_tripped:
                 state = self.states.get(obs.board, BoardState())
                 log.warning(
-                    "%s probe failed (%d of %d before a cycle): %s",
+                    "%s probe failed (%d consecutive, cycles at %d): %s",
                     obs.board, state.consecutive_failures, self.cfg.fail_threshold,
                     obs.error,
                 )

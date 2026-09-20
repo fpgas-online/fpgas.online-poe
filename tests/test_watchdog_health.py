@@ -136,7 +136,18 @@ def test_the_failure_line_shows_progress_towards_a_cycle(caplog):
     wd.states[failing.board] = BoardState(consecutive_failures=1)
     with caplog.at_level(logging.WARNING):
         wd.log_sweep(Decision(occupied=1, failed=1), [failing], [])
-    assert any("1 of 2 before a cycle" in r.message for r in caplog.records)
+    assert any("1 consecutive, cycles at 2" in r.message for r in caplog.records)
+
+
+def test_the_failure_line_still_reads_correctly_past_the_threshold(caplog):
+    """A board held off by its boot grace keeps counting past fail_threshold,
+    so the wording must not imply a countdown."""
+    wd = build(fail_threshold=2)
+    failing = obs(44, ok=False, error="timed out")
+    wd.states[failing.board] = BoardState(consecutive_failures=7)
+    with caplog.at_level(logging.WARNING):
+        wd.log_sweep(Decision(occupied=1, failed=1), [failing], [])
+    assert any("7 consecutive, cycles at 2" in r.message for r in caplog.records)
 
 
 def test_a_tripped_breaker_names_the_failing_boards(caplog):
