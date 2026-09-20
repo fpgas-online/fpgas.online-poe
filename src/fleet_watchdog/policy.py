@@ -111,6 +111,15 @@ def ports_to_recover(
     recover: list[tuple[Board, Recovery]] = []
     give_up: list[tuple[Board, str]] = []
     for snap in snapshots:
+        if snap.unreadable:
+            # We do not know what is wrong, so we must not guess at a fix --
+            # but saying nothing would drop the port out of every rule here.
+            # Report it every sweep and leave the recovery budget untouched.
+            give_up.append((
+                snap.board,
+                "PoE state unreadable (detect=unknown); not acting on it",
+            ))
+            continue
         if snap.faulted:
             why = Recovery.FAULT
         elif snap.powered_off:

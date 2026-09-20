@@ -52,6 +52,15 @@ class PortSnapshot:
         return self.detect is PoEDetect.FAULT
 
     @property
+    def unreadable(self) -> bool:
+        """The switch gave a PoE state this library could not interpret.
+
+        Not the same as a healthy port. Treating it as one would quietly drop
+        the port out of every rule below.
+        """
+        return self.detect is PoEDetect.UNKNOWN
+
+    @property
     def powered_off(self) -> bool:
         """Admin-disabled: the switch was told to stop supplying this port.
 

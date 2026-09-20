@@ -230,3 +230,22 @@ def test_a_protected_port_is_never_recovered(config_path):
     snapshots, _ = wd.scan()
     assert 51 not in {s.board.port for s in snapshots}
     assert 52 not in {s.board.port for s in snapshots}
+
+
+def test_an_unreadable_port_state_is_reported_and_not_acted_on():
+    """PoEDetect.UNKNOWN means the switch said something this library could
+    not interpret. Treating it as healthy would silently drop the port out of
+    every rule; guessing at a fix would act on a state we cannot read."""
+    recover, give_up = ports_to_recover([snap(9, PoEDetect.UNKNOWN)], {}, cfg(), 0.0)
+    assert recover == []
+    assert [b.port for b, _ in give_up] == [9]
+    assert "unreadable" in give_up[0][1]
+
+
+def test_an_unreadable_port_does_not_refund_the_recovery_budget():
+    """Otherwise a port flapping between FAULT and UNKNOWN would be re-armed
+    forever, because each UNKNOWN sweep would reset the attempt count."""
+    board = make_board(2, 9, "10.21")
+    states = {board: BoardState(recovery_attempts=2)}
+    ports_to_recover([snap(9, PoEDetect.UNKNOWN)], states, cfg(), 0.0)
+    assert states[board].recovery_attempts == 2
