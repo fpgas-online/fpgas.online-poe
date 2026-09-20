@@ -156,4 +156,4 @@ def test_the_new_health_settings_have_defaults(tmp_path):
         known_hosts: /kh
     """))
     assert cfg.unhealthy_exit_after == 3
-    assert cfg.max_fault_clears == 3
+    assert cfg.max_recovery_attempts == 3

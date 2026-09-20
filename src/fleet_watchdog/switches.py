@@ -1,4 +1,4 @@
-"""Which boards exist, and how the watchdog talks to their switch.
+"""Which boards exist, what their ports are doing, and how to reach the switch.
 
 Board identity reproduces the formulas in the infra repo's
 ansible/filter_plugins/port_vlans.py (registers the port_vlan_map filter),
@@ -25,6 +25,40 @@ class Board:
 
     def __str__(self) -> str:
         return f"sw{self.switch}/p{self.port} {self.hostname} {self.ip}"
+
+
+@dataclass(frozen=True)
+class PortSnapshot:
+    """One access port's PoE state, as read in a single sweep.
+
+    The watchdog used to see only DELIVERING ports, which made two different
+    problems invisible in the same way: a port the switch had faulted off, and
+    a port this service turned off and then failed to turn back on. Neither is
+    ever enumerated again if you only look at DELIVERING, so neither could be
+    recovered or even reported. Carry the whole state instead.
+    """
+
+    board: Board
+    detect: PoEDetect
+    admin_enabled: bool
+    power_mw: int | None
+
+    @property
+    def delivering(self) -> bool:
+        return self.detect is PoEDetect.DELIVERING
+
+    @property
+    def faulted(self) -> bool:
+        return self.detect is PoEDetect.FAULT
+
+    @property
+    def powered_off(self) -> bool:
+        """Admin-disabled: the switch was told to stop supplying this port.
+
+        Distinct from SEARCHING, which is a live port with nothing drawing on
+        it -- an empty socket, or one whose board has not started drawing yet.
+        """
+        return not self.admin_enabled
 
 
 def make_board(switch: int, port: int, pib_network: str) -> Board:
@@ -55,7 +89,7 @@ def protected_ports(spec) -> frozenset[int]:
     Cutting the gateway trunk isolates the switch; cutting a downstream trunk
     takes the next switch (and every board on it) off the network. SyncSwitch
     raises ProtectedPortError on a write to any of these, which is a hard stop
-    underneath the soft filter in occupied_boards.
+    underneath the soft filter in scan_ports.
     """
     return frozenset(
         {spec.gateway_trunk_port, spec.house_uplink_port, *spec.downstream_trunk_ports}
@@ -75,6 +109,27 @@ def open_switch(spec, community: str) -> SyncSwitch:
     )
 
 
+def scan_ports(
+    sw: SyncSwitch, spec, excluded: frozenset[int], pib_network: str
+) -> list[PortSnapshot]:
+    """Every access port the watchdog is allowed to touch, whatever its state.
+
+    One SNMP read per switch per sweep; the callers filter this rather than
+    asking the switch again.
+    """
+    skip = excluded | protected_ports(spec)
+    return [
+        PortSnapshot(
+            board=make_board(spec.index, status.port, pib_network),
+            detect=status.detect,
+            admin_enabled=status.admin_enabled,
+            power_mw=status.power_mw,
+        )
+        for status in sw.get_poe()
+        if 1 <= status.port <= spec.access_ports and status.port not in skip
+    ]
+
+
 def occupied_boards(
     sw: SyncSwitch, spec, excluded: frozenset[int], pib_network: str
 ) -> list[Board]:
@@ -84,11 +139,8 @@ def occupied_boards(
     transmitting ages out of the MAC table, and that is exactly the board this
     service exists to rescue.
     """
-    skip = excluded | protected_ports(spec)
     return [
-        make_board(spec.index, status.port, pib_network)
-        for status in sw.get_poe()
-        if status.detect is PoEDetect.DELIVERING
-        and 1 <= status.port <= spec.access_ports
-        and status.port not in skip
+        snap.board
+        for snap in scan_ports(sw, spec, excluded, pib_network)
+        if snap.delivering
     ]

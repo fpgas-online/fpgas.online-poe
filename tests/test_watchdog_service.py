@@ -9,7 +9,7 @@ from netgear_switch.virtual.server import VirtualSwitch
 
 from fleet_watchdog.cli import main
 from fleet_watchdog.config import load_config
-from fleet_watchdog.policy import Observation, Reason
+from fleet_watchdog.policy import Decision, Observation, Reason
 from fleet_watchdog.service import Watchdog
 
 DELIVERING = {44, 48}
@@ -65,6 +65,11 @@ def all_dead(board_ports=None):
 
 def watchdog(config_path, probe):
     return Watchdog(load_config(config_path), probe=probe, sleep=lambda s: None)
+
+
+def delivering_boards(wd):
+    snapshots, _ = wd.scan()
+    return [s.board for s in snapshots if s.delivering]
 
 
 def poe_detect(wd, port):
@@ -158,22 +163,22 @@ def test_a_failed_cycle_still_starts_its_boot_grace(config_path, monkeypatch):
         "fleet_watchdog.service.cycle_port",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("dwell interrupted")),
     )
-    board = next(b for b in wd.enumerate() if b.port == 44)
+    board = next(b for b in delivering_boards(wd) if b.port == 44)
     wd.cycle(board, Reason.UNREACHABLE)
     assert wd.states[board].last_cycle is not None
 
 
 def test_a_failed_cycle_attempts_to_restore_power(config_path, monkeypatch, caplog):
-    """A cycle that dies between the off and the on leaves the port dark, and
-    a port that is not DELIVERING is never enumerated again (occupied_boards
-    only counts DELIVERING ports), so nothing would ever turn it back on. The
-    service must make a best-effort attempt to restore power."""
+    """A cycle that dies between the off and the on leaves the port dark. The
+    next sweep's scan now finds it admin-disabled and recovers it (see
+    test_watchdog_recovery), but that is up to five minutes away, so cycle()
+    still makes an immediate best-effort attempt."""
     wd = watchdog(config_path, all_ok())
     monkeypatch.setattr(
         "fleet_watchdog.service.cycle_port",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("dwell interrupted")),
     )
-    board = next(b for b in wd.enumerate() if b.port == 44)
+    board = next(b for b in delivering_boards(wd) if b.port == 44)
     with caplog.at_level(logging.ERROR):
         wd.cycle(board, Reason.UNREACHABLE)
     assert any("power restored after the failed cycle" in r.message for r in caplog.records)
@@ -188,7 +193,7 @@ def test_a_failed_cycle_that_cannot_restore_power_says_so(config_path, monkeypat
         "fleet_watchdog.service.cycle_port",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("dwell interrupted")),
     )
-    board = next(b for b in wd.enumerate() if b.port == 44)
+    board = next(b for b in delivering_boards(wd) if b.port == 44)
     sw = wd.switch(2)
     monkeypatch.setattr(
         sw, "set_poe", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("snmp down"))
@@ -217,12 +222,10 @@ def test_run_exits_immediately_when_shutdown_is_already_set(config_path):
     assert calls == []
 
 
-def test_run_sleeps_the_remaining_interval_and_survives_a_failed_sweep(config_path):
-    """Sweeps never overlap (the loop sleeps max(0, interval - elapsed)), and
-    an exception in one sweep does not end the loop: only the shutdown flag
-    does."""
+def test_run_sleeps_the_remaining_interval_between_sweeps(config_path):
+    """Sweeps never overlap: the loop sleeps max(0, interval - elapsed)."""
     wd = watchdog(config_path, all_ok())
-    clocks = iter([0.0, 5.0, 12.0])
+    clocks = iter([0.0, 5.0, 12.0, 14.0])
     wd.clock = lambda: next(clocks)
     sleeps = []
     wd.sleep = lambda s: sleeps.append(s)
@@ -231,15 +234,34 @@ def test_run_sleeps_the_remaining_interval_and_survives_a_failed_sweep(config_pa
 
     def fake_sweep(dry_run=False):
         calls.append(1)
-        if len(calls) == 1:
-            raise RuntimeError("boom")
-        wd._shutdown = True
+        if len(calls) == 2:
+            wd._shutdown = True
+        return Decision(occupied=2, failed=0)
 
     wd.sweep = fake_sweep
-    wd.run()
-
-    assert len(calls) == 2  # the exception in sweep 1 did not end the loop
+    assert wd.run() == 0
+    assert len(calls) == 2
     assert sleeps == [pytest.approx(wd.cfg.interval - 5.0)]
+
+
+def test_a_raising_sweep_exits_rather_than_looping_forever(config_path, caplog):
+    """The old loop caught every exception and kept going, so a watchdog whose
+    switches.yml had gone missing logged a traceback every five minutes while
+    systemd reported the unit active and healthy. Nothing outside the journal
+    could tell. Exiting hands the problem to systemd, which can escalate to a
+    `failed` unit."""
+    wd = watchdog(config_path, all_ok())
+    wd.sleep = lambda s: None
+
+    def fake_sweep(dry_run=False):
+        raise RuntimeError("switches.yml is corrupt")
+
+    wd.sweep = fake_sweep
+    with caplog.at_level(logging.ERROR):
+        assert wd.run() == 1
+    assert any("exiting so systemd restarts" in r.message for r in caplog.records)
+    # The traceback has to survive: it names the actual cause.
+    assert any(r.exc_info for r in caplog.records)
 
 
 def test_a_switch_that_cannot_be_reached_does_not_kill_the_sweep(tmp_path, monkeypatch, caplog):

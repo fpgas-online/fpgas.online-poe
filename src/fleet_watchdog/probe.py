@@ -12,6 +12,7 @@ board itself is the only place this information exists.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Iterable
@@ -19,6 +20,8 @@ from typing import Callable, Iterable
 from .config import WatchdogConfig
 from .policy import Observation
 from .switches import Board
+
+log = logging.getLogger("fleet_watchdog")
 
 REMOTE_COMMAND = "cat /proc/uptime; who"
 
@@ -84,8 +87,11 @@ def parse_output(board: Board, stdout: str) -> Observation:
     )
 
 
-def _failed(board: Board, error: str) -> Observation:
-    return Observation(board=board, ok=False, uptime_s=None, in_use=False, error=error)
+def _failed(board: Board, error: str, internal: bool = False) -> Observation:
+    return Observation(
+        board=board, ok=False, uptime_s=None, in_use=False, error=error,
+        internal=internal,
+    )
 
 
 def _tidy(text: str) -> str:
@@ -105,7 +111,12 @@ def probe_all(
         try:
             return probe(board)
         except Exception as exc:  # noqa: BLE001 - a probe must never kill the sweep
-            return _failed(board, f"probe raised: {exc}")
+            # A bug in this process must not read as "the board is dead", which
+            # two sweeps later cuts mains power to real hardware. Log the
+            # traceback -- the whole point is that this is OUR fault -- and
+            # mark it internal so policy.decide refuses to cycle on it.
+            log.exception("%s probe raised internally", board)
+            return _failed(board, f"probe raised: {exc!r}", internal=True)
 
     with ThreadPoolExecutor(max(1, min(concurrency, len(boards)))) as pool:
         return list(pool.map(guarded, boards))

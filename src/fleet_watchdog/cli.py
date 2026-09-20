@@ -49,9 +49,17 @@ def main(argv: list[str] | None = None) -> int:
             # safe by construction on a dry run, so pretend this is a steady
             # -state sweep for the purposes of the report.
             wd.first_sweep = False
-        wd.sweep(dry_run=args.dry_run)
+        decision = wd.sweep(dry_run=args.dry_run)
+        # A single sweep exits non-zero for the same reasons the daemon would
+        # restart itself. Without this, `--once` reports success having found
+        # nothing -- which is exactly what a wrong community, an unreachable
+        # switch or a dead key produces, and it is the check the role's verify
+        # step and the README's pre-enable gate both lean on.
+        if decision.unhealthy:
+            log = logging.getLogger("fleet_watchdog")
+            log.error("sweep is unhealthy: %s", decision.unhealthy)
+            return 1
         return 0
     if args.dry_run:
         raise SystemExit("--dry-run needs --once")
-    wd.run()
-    return 0
+    return wd.run()

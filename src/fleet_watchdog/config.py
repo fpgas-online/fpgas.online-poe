@@ -43,9 +43,10 @@ _DEFAULTS: dict[str, object] = {
     # Consecutive unhealthy sweeps (breaker tripped, or no occupied port found
     # at all) before the process exits non-zero and lets systemd restart it.
     "unhealthy_exit_after": 3,
-    # Consecutive failed fault-clear attempts on one port before the watchdog
+    # Consecutive failed attempts to bring one port back to a usable state
+    # (clearing a fault, or re-enabling a port left off) before the watchdog
     # stops trying and just reports it. Reset the moment the port delivers.
-    "max_fault_clears": 3,
+    "max_recovery_attempts": 3,
 }
 
 _REQUIRED = ("switches_config", "pib_network", "ssh_key", "known_hosts")
@@ -74,7 +75,7 @@ class WatchdogConfig:
     breaker_min_failures: int = 3
     ssh_user: str = "pi"
     unhealthy_exit_after: int = 3
-    max_fault_clears: int = 3
+    max_recovery_attempts: int = 3
     exclude: Mapping[int, frozenset[int]] = field(default_factory=dict)
 
 
