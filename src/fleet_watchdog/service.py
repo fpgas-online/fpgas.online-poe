@@ -140,10 +140,16 @@ class Watchdog:
     # -- putting ports back into service ----------------------------------
 
     def recover(self, snapshots: list[PortSnapshot], dry_run: bool = False) -> None:
-        """Clear PoE faults and re-enable ports left switched off.
+        """Clear PoE faults, and re-enable ports THIS service switched off.
 
         Runs before probing: a port that is not delivering has no board to
-        probe, so recovery is the only thing that can ever bring it back.
+        probe, so recovery is the only thing that can ever bring it back. A
+        port recovered here is not probed until the next sweep, which is also
+        about how long a board takes to boot.
+
+        Ports switched off by anyone else are reported and left alone -- see
+        policy.ports_to_recover. On a dry run nothing is written at all, which
+        is what makes the role's verify step safe to run against production.
         """
         for snap in snapshots:
             if snap.delivering:
@@ -182,7 +188,7 @@ class Watchdog:
             else:
                 sw.set_poe(board.port, True)
             self._stranded.discard(board)
-            log.warning("%s recovered: %s cleared, port back in service", board, why.value)
+            log.warning("%s recovered from %s: port back in service", board, why.value)
         except Exception as exc:  # noqa: BLE001 - one port must not end the sweep
             log.error("%s recovery failed (%s): %s", board, why.value, exc)
         finally:
