@@ -86,6 +86,14 @@ class Watchdog:
         # open_switch deliberately: handle creation is already effectively
         # serial, and the lock is uncontended once a handle exists.
         self._switch_lock = threading.Lock()
+        # Ports this process switched off and has not seen come back. Only
+        # these are re-enabled: the board page's PoE control switches a port
+        # off and leaves it off, and re-enabling those would break the site's
+        # own off switch. In memory only, so after a restart a port this
+        # service stranded is indistinguishable from one a person switched
+        # off -- which is why every other admin-disabled port is reported on
+        # every sweep instead of being quietly fixed or quietly ignored.
+        self._stranded: set[Board] = set()
 
     # -- switch access ----------------------------------------------------
 
@@ -137,11 +145,17 @@ class Watchdog:
         Runs before probing: a port that is not delivering has no board to
         probe, so recovery is the only thing that can ever bring it back.
         """
-        to_recover, gave_up = ports_to_recover(
-            snapshots, self.states, self.cfg, self.clock()
+        for snap in snapshots:
+            if snap.delivering:
+                self._stranded.discard(snap.board)
+
+        to_recover, attention, left_alone = ports_to_recover(
+            snapshots, self.states, self.cfg, self.clock(), self._stranded
         )
-        for board, why in gave_up:
+        for board, why in attention:
             log.error("%s %s", board, why)
+        for board, why in left_alone:
+            log.warning("%s %s", board, why)
         if not to_recover:
             return
         if dry_run:
@@ -167,6 +181,7 @@ class Watchdog:
                 sw.clear_poe_fault(board.port, timeouts=self.poe_timeouts)
             else:
                 sw.set_poe(board.port, True)
+            self._stranded.discard(board)
             log.warning("%s recovered: %s cleared, port back in service", board, why.value)
         except Exception as exc:  # noqa: BLE001 - one port must not end the sweep
             log.error("%s recovery failed (%s): %s", board, why.value, exc)
@@ -275,6 +290,10 @@ class Watchdog:
 
     def cycle(self, board: Board, reason: Reason) -> None:
         log.warning("%s cycling PoE: %s", board, reason.value)
+        # Recorded BEFORE the write: if this process dies between the off and
+        # the on, the next sweep must know the port was left off by us rather
+        # than by a person at the board page.
+        self._stranded.add(board)
         try:
             cycle_port(
                 self.switch(board.switch),
@@ -282,6 +301,7 @@ class Watchdog:
                 self.cfg.poe_off_seconds,
                 sleep=self.sleep,
             )
+            self._stranded.discard(board)
         except Exception as exc:  # noqa: BLE001 - includes CycleError
             log.error("%s cycle failed: %s", board, exc)
             # A cycle that dies between the off and the on leaves the port
@@ -290,6 +310,7 @@ class Watchdog:
             # admin-disabled port and recovers it (see ports_to_recover).
             try:
                 self.switch(board.switch).set_poe(board.port, True)
+                self._stranded.discard(board)
                 log.error("%s power restored after the failed cycle", board)
             except Exception as restore_exc:  # noqa: BLE001
                 log.error(

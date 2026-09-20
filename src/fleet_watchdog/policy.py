@@ -10,7 +10,7 @@ from __future__ import annotations
 import enum
 import zlib
 from dataclasses import dataclass
-from typing import Iterable, MutableMapping
+from typing import AbstractSet, Iterable, MutableMapping
 
 from fleet_watchdog.config import WatchdogConfig
 from fleet_watchdog.switches import Board, PortSnapshot
@@ -88,34 +88,51 @@ def ports_to_recover(
     states: MutableMapping[Board, BoardState],
     cfg: WatchdogConfig,
     now: float,
-) -> tuple[list[tuple[Board, Recovery]], list[tuple[Board, str]]]:
-    """Split unusable ports into (recover now, report but leave alone).
+    stranded: AbstractSet[Board] = frozenset(),
+) -> tuple[
+    list[tuple[Board, Recovery]],
+    list[tuple[Board, str]],
+    list[tuple[Board, str]],
+]:
+    """Sort unusable ports into (recover, needs attention, left alone).
 
-    Two states need putting right, and neither is ever seen again once it
-    happens, because a port that is not DELIVERING is not a board to probe:
+    A port that is not DELIVERING is not a board to probe, so nothing the
+    watchdog does to boards can reach it. Two states put it there, and they
+    are not equivalent:
 
-    * FAULT -- the switch cut the port to protect itself from an over-current
-      or a short. Never a deliberate operator state, so clearing it needs no
+    * **FAULT** -- the switch cut the port to protect itself from an
+      over-current or a short. Never a deliberate operator state, and nothing
+      in the platform can produce one on purpose, so clearing it needs no
       permission.
-    * admin-disabled -- somebody, very possibly this service dying mid-cycle,
-      told the switch to stop supplying the port. Left alone it stays dark
-      forever.
+    * **admin-disabled** -- somebody told the switch to stop supplying the
+      port. That somebody is usually a person: the board page's PoE control
+      (snmp_switch.LibraryPort.set) turns a port off and LEAVES it off, with
+      no timer. Re-enabling those would make the site's own off switch stop
+      working within five minutes. So only ports this process turned off and
+      failed to turn back on -- `stranded` -- are re-enabled. Every other
+      admin-disabled port is reported on every sweep and never touched.
 
-    Excluded ports never reach here: scan_ports drops them, so the exclusion
-    list remains the way to tell the watchdog to keep its hands off a port.
+    `stranded` is in-memory and does not survive a restart, which is why the
+    reporting matters: after a restart a port this service left off is
+    indistinguishable from one a person switched off, so it is named every
+    sweep rather than quietly fixed or quietly ignored.
+
+    Excluded ports never reach here -- scan_ports drops them -- so the
+    exclusion list remains the way to make the watchdog ignore a port.
 
     A port that will not stay recovered is a hardware problem, and re-arming
     it every five minutes is both useless and unkind to the hardware, so give
     up after cfg.max_recovery_attempts and keep saying so.
     """
     recover: list[tuple[Board, Recovery]] = []
-    give_up: list[tuple[Board, str]] = []
+    attention: list[tuple[Board, str]] = []
+    left_alone: list[tuple[Board, str]] = []
     for snap in snapshots:
         if snap.unreadable:
             # We do not know what is wrong, so we must not guess at a fix --
             # but saying nothing would drop the port out of every rule here.
             # Report it every sweep and leave the recovery budget untouched.
-            give_up.append((
+            attention.append((
                 snap.board,
                 "PoE state unreadable (detect=unknown); not acting on it",
             ))
@@ -123,6 +140,15 @@ def ports_to_recover(
         if snap.faulted:
             why = Recovery.FAULT
         elif snap.powered_off:
+            if snap.board not in stranded:
+                left_alone.append((
+                    snap.board,
+                    "PoE is switched off and this service did not switch it "
+                    "off. Leaving it alone: the board page's PoE control "
+                    "holds a port off deliberately. If nobody meant this, "
+                    "turn it back on there or with fpgas-switch",
+                ))
+                continue
             why = Recovery.POWERED_OFF
         else:
             # Delivering, or SEARCHING: a live port with nothing drawing on
@@ -134,7 +160,7 @@ def ports_to_recover(
             continue
         state = states.setdefault(snap.board, BoardState())
         if state.recovery_attempts >= cfg.max_recovery_attempts:
-            give_up.append((
+            attention.append((
                 snap.board,
                 f"{why.value}, still not delivering after "
                 f"{state.recovery_attempts} recovery attempts; needs on-site "
@@ -144,7 +170,7 @@ def ports_to_recover(
         if _in_boot_grace(state, cfg, now):
             continue
         recover.append((snap.board, why))
-    return recover, give_up
+    return recover, attention, left_alone
 
 
 def decide(
