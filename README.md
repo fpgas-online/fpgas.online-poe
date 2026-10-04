@@ -82,7 +82,7 @@ What a request gets:
 | 400 | The body is not JSON, or the port or switch is not a whole number in range, or the switch is not configured. |
 | 403 | The port is not one of the switch's access ports, or is one the switches file gives another job (gateway trunk, downstream trunk, uplink): refused before the policy is asked, so no registration, wrong or forged, can reach it. Or the policy says the port is not a board the site offers. Nothing is sent to the switch. |
 | 429 | `toggle` of a port that was power-cycled within the interval, with a `Retry-After` header. Nothing is sent to the switch. |
-| 502 | The switch did not answer. |
+| 502 | The switch did not answer. For `toggle`: "on" is tried again a few times after "off"; if the port may still be off, or the power cycle did not happen, the rate-limit claim is given back so that it can be tried again at once, and the error says so. |
 | 503 | No policy, no rate-limit store (or it is not answering), or no switch configured. |
 
 Every error is JSON `{"error": "<reason>"}`.

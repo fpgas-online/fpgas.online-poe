@@ -15,6 +15,7 @@ import types
 import pytest
 from django.core.cache import caches
 from django.test import Client, override_settings
+from netgear_switch.errors import NetgearSwitchError
 from netgear_switch.virtual.server import VirtualSwitch
 
 from snmp_switch import switches
@@ -311,8 +312,106 @@ def test_a_second_toggle_inside_the_interval_is_a_429_and_the_switch_is_left_alo
     r = post("/toggle", {"port": str(PORT), "switch": 2})
     assert r.status_code == 429
     assert 1 <= int(r["Retry-After"]) <= 60
-    assert f"switch 2 port {PORT} was power-cycled a moment ago; try again in {r['Retry-After']} s" in r.json()["error"]
+    assert (f"switch 2 port {PORT} was power-cycled a moment ago; try again in {r['Retry-After']} seconds"
+            in r.json()["error"])
     assert sets == [False, True]
+    assert switch_2.state.poe[PORT].admin is True
+
+
+def test_retry_after_is_never_longer_than_the_interval(legacy_switch):
+    """Whatever the store holds (an interval since shortened, a clock that
+    moved), nobody is told to wait longer than the interval."""
+    caches["poe-rate-limit"].add("snmp_switch:toggle:legacy:9", time.time() + 86400, timeout=60)
+    r = post("/toggle", {"port": "9"})
+    assert r.status_code == 429
+    assert r["Retry-After"] == "60"
+    assert legacy_switch == []
+
+
+# --- a port this view switched off is not left off ------------------------
+
+
+@pytest.fixture()
+def flaky_on(legacy_switch, monkeypatch):
+    """The legacy switch, whose next `failures["on"]` answers to "on" (and
+    `failures["off"]` to "off") go missing after the switch acted on them."""
+    failures = {"on": 0, "off": 0}
+    real = switches.snmp_set_state
+
+    async def set_state(state, **params):
+        answer = await real(state, **params)
+        step = {"1": "on", "2": "off"}[state]
+        if failures[step]:
+            failures[step] -= 1
+            raise TimeoutError("no answer from the switch")
+        return answer
+
+    monkeypatch.setattr(switches, "snmp_set_state", set_state)
+    return failures
+
+
+def test_on_is_tried_again_when_its_first_answer_goes_missing(flaky_on, legacy_switch):
+    flaky_on["on"] = 1
+    r = post("/toggle", {"port": "9"})
+    assert (r.status_code, r.json()) == (200, {"9": ["off", "on"]})
+    assert legacy_switch == [("set", "9", "2"), ("set", "9", "1"), ("set", "9", "1")]
+    # it was a power cycle: the limit holds
+    assert post("/toggle", {"port": "9"}).status_code == 429
+
+
+def test_a_port_that_may_be_left_off_can_be_reset_again_at_once(flaky_on, legacy_switch):
+    flaky_on["on"] = 3  # every try
+    r = post("/toggle", {"port": "9"})
+    assert r.status_code == 502
+    assert "The port may be off: press Reset again" in r.json()["error"]
+    assert legacy_switch == [("set", "9", "2")] + [("set", "9", "1")] * 3
+    # the claim was given back: the next Reset is not told to wait, and works
+    legacy_switch.clear()
+    r = post("/toggle", {"port": "9"})
+    assert (r.status_code, r.json()) == (200, {"9": ["off", "on"]})
+    assert legacy_switch == [("set", "9", "2"), ("set", "9", "1")]
+
+
+def test_a_port_the_switch_still_reports_off_counts_as_left_off(legacy_switch, monkeypatch):
+    async def stays_off(state, **params):
+        legacy_switch.append(("set", params["port"], state))
+        return {"state": "off"}
+
+    monkeypatch.setattr(switches, "snmp_set_state", stays_off)
+    r = post("/toggle", {"port": "9"})
+    assert r.status_code == 502
+    assert "The port may be off" in r.json()["error"]
+    assert caches["poe-rate-limit"]._cache == {}
+
+
+def test_when_off_fails_on_is_still_sent_and_reset_can_be_pressed_again(flaky_on, legacy_switch):
+    """The answer to "off" went missing: whether the port went off is not
+    known, so "on" is sent all the same, and no power cycle is counted."""
+    flaky_on["off"] = 1
+    r = post("/toggle", {"port": "9"})
+    assert r.status_code == 502
+    assert "could not be switched off" in r.json()["error"] and "the port is on" in r.json()["error"]
+    assert legacy_switch == [("set", "9", "2"), ("set", "9", "1")]
+    assert post("/toggle", {"port": "9"}).status_code == 200
+
+
+def test_the_per_port_vlan_switch_is_switched_back_on_too(switch_2, monkeypatch):
+    """The same, through netgear_switch: the first "on" never reaches the
+    virtual switch; the second gets through."""
+    real_set_poe = switches.SyncSwitch.set_poe
+    failed = []
+
+    def set_poe(self, port, on):
+        if on and not failed:
+            failed.append(port)
+            raise NetgearSwitchError("timeout")
+        return real_set_poe(self, port, on)
+
+    monkeypatch.setattr(switches.SyncSwitch, "set_poe", set_poe)
+    monkeypatch.setattr("snmp_switch.views.time", types.SimpleNamespace(sleep=lambda seconds: None))
+    r = post("/toggle", {"port": str(PORT), "switch": 2})
+    assert (r.status_code, r.json()) == (200, {str(PORT): ["off", "on"]})
+    assert failed == [PORT]
     assert switch_2.state.poe[PORT].admin is True
 
 

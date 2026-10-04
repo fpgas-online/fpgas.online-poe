@@ -63,19 +63,24 @@ def toggle_interval():
     return interval
 
 
+def _claim_key(ref):
+    return f"snmp_switch:toggle:{'legacy' if ref.switch is None else ref.switch}:{ref.port}"
+
+
 def seconds_until_toggle_allowed(ref):
     """Claim this port's one power cycle per interval. 0 when the claim was
     taken (go ahead), otherwise the seconds until the port may be cycled
     again. The claim is taken in one atomic step (cache.add), so of two
-    requests that arrive together only one goes ahead. It is kept whatever
-    the switch then answers: the limit is on what is sent to the switch."""
+    requests that arrive together only one goes ahead. The view gives it
+    back (release_toggle_claim) when the switch did not carry the power
+    cycle out."""
     interval = toggle_interval()
     alias = getattr(settings, RATE_LIMIT_CACHE_SETTING, None)
     if not alias:
         raise PoeConfigError(
             f"PoE control is refused: this site has no shared store for the power-cycle rate limit "
             f"({RATE_LIMIT_CACHE_SETTING} is not set)")
-    key = f"snmp_switch:toggle:{'legacy' if ref.switch is None else ref.switch}:{ref.port}"
+    key = _claim_key(ref)
     now = time.time()
     try:
         cache = caches[alias]
@@ -87,4 +92,15 @@ def seconds_until_toggle_allowed(ref):
         log.exception("the power-cycle rate limit store (cache %r) failed", alias)
         raise PoeConfigError("PoE control is refused: the power-cycle rate limit store is not answering") from e
     # the claim that beat this request may expire between add() and get()
-    return max(1, math.ceil(until - now)) if isinstance(until, (int, float)) else 1
+    # (and never tell anyone to wait longer than the interval, whatever is stored)
+    return min(interval, max(1, math.ceil(until - now))) if isinstance(until, (int, float)) else 1
+
+
+def release_toggle_claim(ref):
+    """Give the claim back: the power cycle it was taken for did not happen
+    (or did not finish), so the port may be tried again at once. A store that
+    cannot be asked is logged and left: the claim then runs out by itself."""
+    try:
+        caches[getattr(settings, RATE_LIMIT_CACHE_SETTING)].delete(_claim_key(ref))
+    except Exception:
+        log.exception("could not release the power-cycle claim on %s", ref)

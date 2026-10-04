@@ -1,5 +1,6 @@
 import functools
 import json
+import logging
 import time
 
 from asgiref.sync import async_to_sync
@@ -12,8 +13,16 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from netgear_switch.errors import NetgearSwitchError
 
-from snmp_switch.policy import port_policy, seconds_until_toggle_allowed
+from snmp_switch.policy import port_policy, release_toggle_claim, seconds_until_toggle_allowed
 from snmp_switch.switches import PoeConfigError, PoeNotABoardPort, PoeRequestError, open_port, requested_port
+
+log = logging.getLogger(__name__)
+
+# Switching a port back on is tried this many times, this long apart, before
+# the view gives up and says the port may be off.
+ON_ATTEMPTS = 3
+ON_RETRY_SECONDS = 1
+
 
 def not_a_board(ref):
     return JsonResponse(
@@ -86,7 +95,7 @@ def toggle(ref):
     wait = seconds_until_toggle_allowed(ref)
     if wait:
         response = JsonResponse(
-            {'error': f'{ref} was power-cycled a moment ago; try again in {wait} s. '
+            {'error': f'{ref} was power-cycled a moment ago; try again in {wait} seconds. '
                       f'Nothing was sent to the switch'},
             status=429)
         response['Retry-After'] = str(wait)
@@ -94,13 +103,50 @@ def toggle(ref):
 
     poe = open_port(ref)
     port = str(ref.port)
-    ret = {port: []}
 
-    for on in (False, True):
-        state = poe.set(on)
-        notify_dcws(ref.port, "set", state)
-        ret[port].append(state)
-        if not on:
-            time.sleep(.5)
+    # Off. If the switch did not take it, the port is most likely still on,
+    # but that is not known: either way the "on" below is still sent.
+    try:
+        off = poe.set(False)
+    except Exception as e:
+        log.exception("%s: switching off failed", ref)
+        off, off_error = None, e
+    else:
+        off_error = None
+        notify_dcws(ref.port, "set", off)
+        time.sleep(.5)
 
-    return JsonResponse(ret)
+    # On, and not left at one try: a port this view switched off must not
+    # stay off because one answer from the switch went missing.
+    on, on_error = None, None
+    for attempt in range(ON_ATTEMPTS):
+        if attempt:
+            time.sleep(ON_RETRY_SECONDS)
+        try:
+            on = poe.set(True)
+        except Exception as e:
+            log.exception("%s: switching on failed (try %d of %d)", ref, attempt + 1, ON_ATTEMPTS)
+            on, on_error = None, e
+        else:
+            on_error = None if on != "off" else RuntimeError("the switch still reports the port off")
+        if on_error is None:
+            break
+
+    if on_error is not None:
+        # no power cycle to protect, and someone has to be able to switch
+        # the port back on: the next Reset must not be told to wait
+        release_toggle_claim(ref)
+        return JsonResponse(
+            {'error': f'switch: {ref} was switched off and the switch did not confirm switching it '
+                      f'back on ({on_error}). The port may be off: press Reset again, it can be '
+                      f'tried again at once'},
+            status=502)
+    notify_dcws(ref.port, "set", on)
+    if off_error is not None:
+        release_toggle_claim(ref)
+        return JsonResponse(
+            {'error': f'switch: {ref} could not be switched off ({off_error}), so it was not '
+                      f'power-cycled; the port is on. Reset can be pressed again at once'},
+            status=502)
+
+    return JsonResponse({port: [off, on]})
