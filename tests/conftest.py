@@ -14,5 +14,8 @@ def pytest_configure():
         # notify_dcws() group_sends the PoE state to the board page; an
         # in-memory layer accepts it without a running consumer
         CHANNEL_LAYERS={"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}},
+        # what a site must supply before the views act on anything
+        # (snmp_switch.policy): which ports are boards
+        SNMP_SWITCH_PORT_POLICY="tests.policy.offered",
     )
     django.setup()
