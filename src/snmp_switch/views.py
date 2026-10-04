@@ -12,7 +12,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from netgear_switch.errors import NetgearSwitchError
 
-from snmp_switch.policy import port_policy
+from snmp_switch.policy import port_policy, seconds_until_toggle_allowed
 from snmp_switch.switches import PoeConfigError, PoeRequestError, open_port, requested_port
 
 
@@ -76,7 +76,16 @@ def status(ref):
 
 @poe_view
 def toggle(ref):
-    # turn the port off and on again
+    # turn the port off and on again, at most once per interval
+
+    wait = seconds_until_toggle_allowed(ref)
+    if wait:
+        response = JsonResponse(
+            {'error': f'{ref} was power-cycled a moment ago; try again in {wait} s. '
+                      f'Nothing was sent to the switch'},
+            status=429)
+        response['Retry-After'] = str(wait)
+        return response
 
     poe = open_port(ref)
     port = str(ref.port)

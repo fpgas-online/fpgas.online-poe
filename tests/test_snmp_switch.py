@@ -9,9 +9,11 @@ Requires the net-snmp CLI tools (apt: snmp), like the switch_setup tests.
 import json
 import os
 import textwrap
+import time
 import types
 
 import pytest
+from django.core.cache import caches
 from django.test import Client, override_settings
 from netgear_switch.virtual.server import VirtualSwitch
 
@@ -39,10 +41,12 @@ def no_switch_env(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def site_offers_port(no_switch_env):
-    """The site's policy offers PORT on switch 2 and nothing else."""
+    """The site's policy offers PORT on switch 2 and nothing else, and no
+    port has been power-cycled yet."""
     policy.OFFERED.clear()
     policy.OFFERED.add((2, PORT))
     policy.ASKED.clear()
+    caches["poe-rate-limit"].clear()
 
 
 @pytest.fixture()
@@ -113,7 +117,7 @@ def legacy_switch(monkeypatch):
     monkeypatch.setattr(switches, "mk_params", dict)
     monkeypatch.setattr(switches, "snmp_get_state", get_state)
     monkeypatch.setattr(switches, "snmp_set_state", set_state)
-    # the view's pause between off and on
+    # the view's pause between off and on, without stopping the tests' clock
     monkeypatch.setattr("snmp_switch.views.time", types.SimpleNamespace(sleep=lambda seconds: None))
     policy.OFFERED.clear()
     policy.OFFERED.add((None, 9))
@@ -227,6 +231,68 @@ def test_legacy_scheme_has_no_switch_to_name(legacy_switch):
     r = post("/toggle", {"port": "9", "switch": 1})
     assert r.status_code == 400
     assert "'switch' is not accepted" in r.json()["error"]
+    assert legacy_switch == []
+
+
+# --- one power cycle per port per interval --------------------------------
+
+
+def test_a_second_toggle_inside_the_interval_is_a_429_and_the_switch_is_left_alone(switch_2, monkeypatch):
+    sets = []
+    real_set = switches.LibraryPort.set
+    monkeypatch.setattr(switches.LibraryPort, "set", lambda self, on: sets.append(on) or real_set(self, on))
+    assert post("/toggle", {"port": str(PORT), "switch": 2}).status_code == 200
+    assert sets == [False, True]
+    r = post("/toggle", {"port": str(PORT), "switch": 2})
+    assert r.status_code == 429
+    assert 1 <= int(r["Retry-After"]) <= 60
+    assert f"switch 2 port {PORT} was power-cycled a moment ago; try again in {r['Retry-After']} s" in r.json()["error"]
+    assert sets == [False, True]
+    assert switch_2.state.poe[PORT].admin is True
+
+
+def test_the_interval_is_per_port(legacy_switch):
+    policy.OFFERED.add((None, 8))
+    assert post("/toggle", {"port": "9"}).status_code == 200
+    assert post("/toggle", {"port": "8"}).status_code == 200
+    assert post("/toggle", {"port": "9"}).status_code == 429
+
+
+def test_a_port_can_be_cycled_again_after_the_interval(legacy_switch):
+    with override_settings(SNMP_SWITCH_TOGGLE_INTERVAL=1):
+        assert post("/toggle", {"port": "9"}).status_code == 200
+        assert post("/toggle", {"port": "9"}).status_code == 429
+        time.sleep(1.1)
+        assert post("/toggle", {"port": "9"}).status_code == 200
+
+
+def test_status_is_not_rate_limited(legacy_switch):
+    assert post("/toggle", {"port": "9"}).status_code == 200
+    assert post("/status", {"port": "9"}).status_code == 200
+    assert post("/status", {"port": "9"}).status_code == 200
+
+
+def test_a_refused_port_takes_no_ones_turn(legacy_switch):
+    """The policy comes first: asking for a port that is not offered neither
+    reaches the limit store nor delays the offered port."""
+    assert post("/toggle", {"port": "10"}).status_code == 403
+    assert post("/toggle", {"port": "10"}).status_code == 403
+    assert post("/toggle", {"port": "9"}).status_code == 200
+
+
+@pytest.mark.parametrize("broken, reason", [
+    ({"SNMP_SWITCH_RATE_LIMIT_CACHE": None}, "SNMP_SWITCH_RATE_LIMIT_CACHE is not set"),
+    ({"SNMP_SWITCH_RATE_LIMIT_CACHE": "no-such-cache"}, "rate limit store is not answering"),
+    ({"SNMP_SWITCH_TOGGLE_INTERVAL": 0}, "SNMP_SWITCH_TOGGLE_INTERVAL must be"),
+    ({"SNMP_SWITCH_TOGGLE_INTERVAL": None}, "SNMP_SWITCH_TOGGLE_INTERVAL must be"),
+])
+def test_toggle_without_a_working_rate_limit_is_refused(legacy_switch, broken, reason):
+    """Fail closed: no limit store, or one that cannot be asked, is not
+    permission to power-cycle without a limit."""
+    with override_settings(**broken):
+        r = post("/toggle", {"port": "9"})
+    assert r.status_code == 503
+    assert reason in r.json()["error"]
     assert legacy_switch == []
 
 
