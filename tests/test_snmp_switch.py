@@ -505,5 +505,13 @@ def test_a_body_that_is_not_json_is_a_clean_400(switch_2_untouchable, path):
 
 
 @pytest.mark.parametrize("path", ["/status", "/toggle"])
+@pytest.mark.parametrize("opener", ["[", '{"port":'])
+def test_a_body_nested_too_deeply_to_read_is_a_clean_400(switch_2_untouchable, path, opener):
+    r = Client().post(path, data=opener * 100000, content_type="application/json")
+    assert r.status_code == 400
+    assert "expected a JSON body" in r.json()["error"]
+
+
+@pytest.mark.parametrize("path", ["/status", "/toggle"])
 def test_only_post_is_answered(switch_2_untouchable, path):
     assert Client().get(path).status_code == 405

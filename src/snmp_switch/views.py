@@ -48,7 +48,7 @@ def poe_view(fn):
             allowed = port_policy()
             try:
                 body = json.loads(request.body)
-            except ValueError:
+            except (ValueError, RecursionError):  # RecursionError: nested too deeply to read
                 raise PoeRequestError('expected a JSON body {"port": ..., "switch": ...}') from None
             ref = requested_port(body)
             if not allowed(request, ref.switch, ref.port):
