@@ -8,12 +8,11 @@ from asgiref.sync import async_to_sync
 # so we can send the browser a message when the power goes off and on:
 # tangle up this code with the django-connect web socket code :(
 from channels.layers import get_channel_layer
-from django.http import HttpResponse, JsonResponse
+from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from netgear_switch.errors import NetgearSwitchError
 
 from snmp_switch.switches import PoeConfigError, PoeRequestError, poe_port
-from snmp_switch.utils import mk_params, snmp_set_state
 
 
 def poe_view(fn):
@@ -78,55 +77,3 @@ def toggle(port, poe):
             time.sleep(.5)
 
     return JsonResponse(ret)
-
-
-@csrf_exempt
-def toggle_all(request):
-
-    params = mk_params()
-
-    ret = { port:[] for port in range(48) }
-
-    # all off:
-    for port in range(1,48):
-        params['port'] = str(port)
-        d = snmp_set_state( state='2', **params )
-        notify_dcws(port, "get", d['state'])
-        ret[port].append(d['state'])
-
-    time.sleep(1)
-
-    # all on:
-    for port in range(1,48):
-        params['port'] = str(port)
-        d = snmp_set_state( state='1', **params )
-        notify_dcws(port, "set", d['state'])
-        ret['was'][port] = d['state']
-
-    response = HttpResponse(content_type="application/json")
-    json.dump(ret, response, indent=2)
-
-    return response
-
-@csrf_exempt
-def off_all(request):
-
-    # 2=off
-    # params['state']=2
-
-    params = mk_params()
-    ret = { port:[] for port in range(48) }
-
-    # all off:
-    for port in range(1,48):
-        params['port'] = str(port)
-        d = snmp_set_state( state='2', **params )
-        notify_dcws(port, "set", d['state'])
-        ret[port].append(d['state'])
-
-    response = HttpResponse(content_type="application/json")
-    json.dump(ret, response, indent=2)
-
-    return response
-
-

@@ -99,3 +99,9 @@ def test_unknown_switch_is_a_400(switch_2):
     r = post("/status", {"port": str(PORT), "switch": 7})
     assert r.status_code == 400
     assert "switch 7" in r.json()["error"]
+
+
+@pytest.mark.parametrize("path", ["/toggle_all", "/off_all"])
+def test_the_bulk_routes_are_gone(path):
+    assert post(path, {}).status_code == 404
+    assert Client().get(path).status_code == 404
