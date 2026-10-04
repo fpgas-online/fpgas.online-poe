@@ -41,6 +41,11 @@ class PoeRequestError(Exception):
     """The request does not identify a configured switch port."""
 
 
+class PoeNotABoardPort(Exception):
+    """The request names a port that cannot be a board's: nothing may be
+    sent to the switch for it, whatever the site's policy would say."""
+
+
 @dataclass
 class LibraryPort:
     """One switch port, driven through netgear_switch."""
@@ -100,6 +105,22 @@ class PortRef:
         return f"port {self.port}" if self.switch is None else f"switch {self.switch} port {self.port}"
 
 
+def is_access_port(spec, port):
+    """Whether `port` of the switch `spec` describes can have a board on it:
+    one of its access ports, and not a port the same description gives
+    another job (the trunk to the gateway, a trunk to a downstream switch,
+    the uplink), even if such a port lies inside the access range.
+
+    This comes from the switches file alone, so it holds whatever the site's
+    policy answers. A site's idea of where its boards are comes from what
+    the boards themselves registered; this is the bound on how far a wrong or
+    forged registration can reach: to another access port, never to a trunk
+    or an uplink."""
+    return (1 <= port <= spec.access_ports
+            and port not in (spec.gateway_trunk_port, spec.house_uplink_port)
+            and port not in spec.downstream_trunk_ports)
+
+
 def _library_ref(body, port):
     specs = load_specs(os.environ[CONFIG_ENV])
     index = body.get("switch")
@@ -114,7 +135,10 @@ def _library_ref(body, port):
         spec = next((s for s in specs if s.index == index), None)
         if spec is None:
             raise PoeRequestError(f"switch {index} is not configured")
-    return PortRef(spec.index, port, spec)
+    ref = PortRef(spec.index, port, spec)
+    if not is_access_port(spec, port):
+        raise PoeNotABoardPort(ref)
+    return ref
 
 
 def requested_port(body):
@@ -127,6 +151,9 @@ def requested_port(body):
     if os.environ.get(LEGACY_HOST_ENV):
         if body.get("switch") is not None:
             raise PoeRequestError("'switch' is not accepted: this site has one switch, which has no index")
+        # The legacy scheme has no description of the switch (no switches
+        # file), so there is no access-port bound to apply here: the site's
+        # policy alone decides which ports are boards.
         return PortRef(None, port)
     raise PoeConfigError(
         f"PoE control is not configured: set {CONFIG_ENV} (per-port-VLAN switches) "

@@ -18,6 +18,7 @@ from django.test import Client, override_settings
 from netgear_switch.virtual.server import VirtualSwitch
 
 from snmp_switch import switches
+from switch_setup.plan import SwitchSpec
 from tests import policy
 
 PORT = 3  # PoE admin-enabled in the virtual S3300's seed
@@ -169,13 +170,77 @@ def test_unknown_switch_is_a_400(switch_2):
 
 
 @pytest.mark.parametrize("path", ["/status", "/toggle"])
-@pytest.mark.parametrize("port", [TRUNK_PORT, UPLINK_PORT, OTHER_PORT, 48, 999])
+@pytest.mark.parametrize("port", [OTHER_PORT, 1, 48])
 def test_a_port_the_site_does_not_offer_is_refused_and_the_switch_never_asked(switch_2_untouchable, path, port):
     r = post(path, {"port": str(port), "switch": 2})
     assert r.status_code == 403
     assert r.json() == {"error": f"switch 2 port {port} is not a board this site offers; "
                                  "nothing was sent to the switch"}
     assert policy.ASKED == [(2, port)]
+
+
+# --- never a trunk, an uplink or a port outside the access ports ----------
+#
+# The site's policy answers from what boards registered, and a registration
+# can be wrong or forged. Whatever the policy would say, a port the switches
+# file does not make an access port is refused before the policy is asked.
+
+# A head switch as a site describes one: 40 access ports, with the ports above
+# them given other jobs, and (to show the range alone is not the test) a
+# downstream trunk that lies inside the access range.
+HEAD = SwitchSpec(index=1, model="gsm7252ps", mgmt_host="192.0.2.1", access_ports=40,
+                  gateway_trunk_port=47, downstream_trunk_ports=(50, 12), house_uplink_port=48)
+
+
+@pytest.mark.parametrize("port, board", [
+    (1, True), (11, True), (13, True), (40, True),
+    (12, False),  # a downstream trunk inside the access range
+    (0, False), (-1, False), (41, False), (46, False),  # outside the access ports
+    (47, False), (48, False), (50, False),  # gateway trunk, uplink, downstream trunk
+    (52, False), (60, False), (999, False),
+])
+def test_only_an_access_port_with_no_other_job_can_be_a_boards(port, board):
+    assert switches.is_access_port(HEAD, port) is board
+
+
+@pytest.fixture()
+def head_switch_untouchable(tmp_path, monkeypatch, no_switch_traffic):
+    """HEAD configured as switch 1, with no switch behind it, and a site
+    policy that says yes to every port (as after forged registrations)."""
+    cfg = tmp_path / "switches.yml"
+    cfg.write_text(textwrap.dedent("""
+        switches:
+          - index: 1
+            model: gsm7252ps
+            mgmt_host: 192.0.2.1
+            access_ports: 40
+            gateway_trunk_port: 47
+            downstream_trunk_ports: [50, 12]
+            house_uplink_port: 48
+        """))
+    monkeypatch.setenv("FPGAS_SWITCHES_CONFIG", str(cfg))
+    monkeypatch.setenv("FPGAS_SWITCH_COMMUNITY_1", "not-used")
+    monkeypatch.setattr(policy, "OFFERED", type("Everything", (), {"__contains__": lambda self, item: True})())
+
+
+@pytest.mark.parametrize("path", ["/status", "/toggle"])
+@pytest.mark.parametrize("port", [12, 41, 46, 47, 48, 50, 52, 60, 999])
+def test_a_trunk_uplink_or_out_of_range_port_is_refused_even_if_the_site_would_offer_it(
+        head_switch_untouchable, path, port):
+    r = post(path, {"port": port, "switch": 1})
+    assert r.status_code == 403
+    assert r.json() == {"error": f"switch 1 port {port} is not a board this site offers; "
+                                 "nothing was sent to the switch"}
+    assert policy.ASKED == []  # refused on the switch's own description, before the site is asked
+    # and it took no one's turn at the rate limit
+    assert caches["poe-rate-limit"]._cache == {}
+
+
+@pytest.mark.parametrize("port", [TRUNK_PORT, UPLINK_PORT])
+def test_the_trunk_and_uplink_of_the_downstream_switch_are_refused_too(switch_2_untouchable, port):
+    policy.OFFERED.add((2, port))
+    assert post("/toggle", {"port": port, "switch": 2}).status_code == 403
+    assert policy.ASKED == []
 
 
 def test_the_policy_is_asked_about_the_switch_the_request_implies(switch_2):

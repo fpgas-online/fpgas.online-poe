@@ -13,13 +13,18 @@ from django.views.decorators.http import require_POST
 from netgear_switch.errors import NetgearSwitchError
 
 from snmp_switch.policy import port_policy, seconds_until_toggle_allowed
-from snmp_switch.switches import PoeConfigError, PoeRequestError, open_port, requested_port
+from snmp_switch.switches import PoeConfigError, PoeNotABoardPort, PoeRequestError, open_port, requested_port
+
+def not_a_board(ref):
+    return JsonResponse(
+        {'error': f'{ref} is not a board this site offers; nothing was sent to the switch'}, status=403)
 
 
 def poe_view(fn):
-    """Decode the JSON body, work out the switch port it names, and ask the
-    site whether that port is a board it offers (snmp_switch.policy) before
-    the view does anything. The ways that can go wrong are JSON errors, not a
+    """Decode the JSON body, work out the switch port it names, refuse a
+    port that cannot be a board's (a trunk, an uplink, a port outside the
+    switch's access ports), and ask the site whether that port is a board it
+    offers (snmp_switch.policy) before the view does anything. The ways that can go wrong are JSON errors, not a
     bare 500: a bad request is a 400, a port the site does not offer a 403,
     an unconfigured service a 503, a switch that will not answer a 502.
 
@@ -38,10 +43,10 @@ def poe_view(fn):
                 raise PoeRequestError('expected a JSON body {"port": ..., "switch": ...}') from None
             ref = requested_port(body)
             if not allowed(request, ref.switch, ref.port):
-                return JsonResponse(
-                    {'error': f'{ref} is not a board this site offers; nothing was sent to the switch'},
-                    status=403)
+                return not_a_board(ref)
             return fn(ref)
+        except PoeNotABoardPort as e:
+            return not_a_board(e.args[0])
         except PoeRequestError as e:
             return JsonResponse({'error': str(e)}, status=400)
         except PoeConfigError as e:
