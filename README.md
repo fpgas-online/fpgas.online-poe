@@ -11,7 +11,7 @@ Controls Netgear PoE switches to power-cycle Raspberry Pi boards connected to FP
 - SNMP-based PoE port control (on/off/toggle)
 - Django views for web-based switch status and control
 - CLI tools for scripted port management
-- Per-port and bulk operations (toggle all, power off all)
+- Per-port operations from the web; bulk operations (all on, all off) only from the shell scripts
 
 ## Installation
 
@@ -60,6 +60,34 @@ one switch is configured. Needs the net-snmp CLI tools (apt: `snmp`) on the host
 | `SNMP_SWITCH_PRIVKEY` | Privacy key |
 
 These are set by the [fpgas.online-infra](https://github.com/fpgas-online/fpgas.online-infra) Ansible `snmp` role via `/etc/environment`.
+
+### Which requests the Django views act on
+
+`/snmp/status` and `/snmp/toggle` take a JSON body `{"port": ..., "switch": ...}` by
+POST and need no login, so the Django project that routes them must say which ports
+they may touch. Until it does, every request is refused (503): the package is never
+an open endpoint by default.
+
+| Django setting | Purpose |
+|----------------|---------|
+| `SNMP_SWITCH_PORT_POLICY` | Dotted path of a callable `policy(request, switch, port) -> bool`: whether that port is a board the site offers. `switch` is the switch's index (None on the legacy single switch), `port` an int. Answer it from the data the site's pages are built from, not from a list. Required. |
+| `SNMP_SWITCH_RATE_LIMIT_CACHE` | Alias in `CACHES` of the store for the power-cycle rate limit. It must be shared by every process serving the views (redis, memcached, the database), not per-process memory. Required for `/snmp/toggle`. |
+| `SNMP_SWITCH_TOGGLE_INTERVAL` | Seconds between two power cycles of one port. Optional, default 60. |
+
+What a request gets:
+
+| Answer | When |
+|--------|------|
+| 200 | The port is a board the site offers (and, for `toggle`, was not power-cycled within the interval). |
+| 400 | The body is not JSON, or the port or switch is not a whole number in range, or the switch is not configured. |
+| 403 | The port is not one of the switch's access ports, or is one the switches file gives another job (gateway trunk, downstream trunk, uplink): refused before the policy is asked, so no registration, wrong or forged, can reach it. Or the policy says the port is not a board the site offers. Nothing is sent to the switch. |
+| 429 | `toggle` of a port that was power-cycled within the interval, with a `Retry-After` header. Nothing is sent to the switch. |
+| 502 | The switch did not answer. For `toggle`: "on" is tried again a few times after "off"; if the port may still be off, or the power cycle did not happen, the rate-limit claim is given back so that it can be tried again at once, and the error says so. |
+| 503 | No policy, no rate-limit store (or it is not answering), or no switch configured. |
+
+Every error is JSON `{"error": "<reason>"}`.
+
+The access-port bound needs the switches file, so it exists on the per-port-VLAN scheme only. The legacy single switch has no description of its ports: there the policy alone decides. The switches file has no notion of a service port: one inside the access range is treated like any other access port (accepted only if the policy offers it).
 
 ## Directory Structure
 
