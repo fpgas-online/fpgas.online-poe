@@ -33,12 +33,13 @@ cli = [
 
 [project.scripts]
 fpgas-switch-setup = "switch_setup.cli:main"
+fpgas-fleet-watchdog = "fleet_watchdog.cli:main"
 
 [project.urls]
 Repository = "https://github.com/fpgas-online/fpgas.online-poe"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/snmp_switch", "src/switch_setup"]
+packages = ["src/snmp_switch", "src/switch_setup", "src/fleet_watchdog"]
 
 [dependency-groups]
 dev = ["pytest"]

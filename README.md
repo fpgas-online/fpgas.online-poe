@@ -136,6 +136,39 @@ FPGAS_SWITCH_COMMUNITY=public fpgas-switch-setup \
   --config switches.yml --switch 2 --host 127.0.0.1:1610
 ```
 
+## fpgas-fleet-watchdog
+
+Sweeps every access port on every configured switch, checks the attached board
+answers an SSH login, and PoE-cycles anything that does not. Also recycles
+healthy boards that have been up longer than the configured maximum.
+
+Deployed by the [fpgas.online-infra](https://github.com/fpgas-online/fpgas.online-infra)
+`fleet-watchdog` role as a systemd service on the gateway. Configuration is
+`/etc/fpgas/watchdog.yml`; SNMP write communities come from the environment as
+`FPGAS_SWITCH_COMMUNITY_<index>`, the same variables the PoE web views use.
+
+```bash
+# one sweep, decide and log, change nothing
+fpgas-fleet-watchdog --config /etc/fpgas/watchdog.yml --once --dry-run --verbose
+
+# run the loop in the foreground
+fpgas-fleet-watchdog --config /etc/fpgas/watchdog.yml
+```
+
+A port counts as occupied when it is delivering PoE, whatever the MAC table
+says: a board hung hard enough to stop transmitting ages out of the MAC table,
+and that is exactly the board worth rescuing.
+
+Safety behaviour worth knowing before running it:
+
+- The first sweep after any start observes only and cycles nothing.
+- If at least `breaker_min_failures` boards fail and they are more than
+  `breaker_fraction` of the occupied ports, it cycles nothing and logs an error.
+  Most of the fleet failing at once usually means the watchdog is broken, not
+  the fleet.
+- Trunk and uplink ports are passed to the switch as protected, so a write to
+  one raises rather than cutting the link to another switch.
+
 ## Linting
 
 - **ruff**: blocking
