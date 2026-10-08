@@ -7,8 +7,9 @@ per switch per interval, whatever the number of viewers, with traffic worked
 out as a rate between two reads.
 
 Nothing here writes to a switch, and no SNMP community reaches a view, an
-error text or a log line: any text that comes back from the library is
-scrubbed of the community before it is kept.
+error text or a log line: a view's error is one of a few fixed public texts,
+and the detail logged is scrubbed of the community. Text the switch itself
+reports (port labels, LLDP names, the sysName) is shown as the switch gives it.
 
 Two deployment shapes exist (see :mod:`snmp_switch.switches`). The
 per-port-VLAN switches (welland) are read through ``netgear_switch``. The
@@ -216,9 +217,14 @@ def _read_spec(spec):
     view.good_at = _now().isoformat()
     lldp = _read_or_none(sw.get_lldp, "LLDP", notes, spec, community)
     macs = _read_or_none(sw.get_macs, "MAC table", notes, spec, community)
-    if name:
-        view.name = _scrub(name, community)
-    view.ports = _build_ports(ports, poe, stats, lldp, macs, get_model(spec.model).port_count)
+    try:
+        if name:
+            view.name = _scrub(name, community)
+        view.ports = _build_ports(ports, poe, stats, lldp, macs, get_model(spec.model).port_count)
+    except Exception as exc:  # an odd answer must not take the other switches' views with it
+        view.error = "ports not read"
+        log.warning("switch %s (%s): ports not read: %s", spec.index, spec.mgmt_host, _detail(exc, community))
+        return view
     view.reachable = True
     view.error = "; ".join(notes)
     return view

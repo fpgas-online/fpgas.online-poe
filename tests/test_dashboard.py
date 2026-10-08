@@ -536,3 +536,31 @@ def test_only_front_panel_ports_are_shown():
            for n, name in ((1, "1/0/1"), (52, "1/0/52"), (417, "CPU Interface:  0/5/1"), (418, "lag 1"))]
     views = dashboard._build_ports(ifs, None, None, None, None, port_count=52)
     assert [v.port for v in views] == [1, 52]
+
+
+def test_a_switch_whose_ports_cannot_be_built_does_not_hide_the_others(monkeypatch, tmp_path):
+    one, two = serve("gsm7252ps"), serve("gsm7228ps")
+    try:
+        configure(monkeypatch, tmp_path, (1, "gsm7252ps", one), (2, "s3300", two))
+        _build_fails_once_then_read(monkeypatch)
+    finally:
+        one.stop()
+        two.stop()
+
+
+def _build_fails_once_then_read(monkeypatch):
+    real = dashboard._build_ports
+    calls = []
+
+    def first_fails(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ValueError(f"odd answer {COMMUNITY}")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(dashboard, "MAX_THREADS", 1)
+    monkeypatch.setattr(dashboard, "_build_ports", first_fails)
+    views = dashboard.read_all()
+    assert [(v.reachable, v.error) for v in views][0] == (False, "ports not read")
+    assert views[1].reachable and len(views[1].ports) == 52
+    assert COMMUNITY not in repr(views)
