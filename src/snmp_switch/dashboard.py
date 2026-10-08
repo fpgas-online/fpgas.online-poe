@@ -16,10 +16,11 @@ legacy SNMPv3 switch (ps1) is not read yet: it gets one view that says so.
 """
 
 import logging
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
-from netgear_switch import NetgearSwitchError
 from netgear_switch.models import PoEDetect
 from netgear_switch.transport.sync.snmp_netsnmp_cli import NetsnmpCliClient
 
@@ -46,7 +47,10 @@ DEFAULT_TTL = 15
 KEEP_SECONDS = 24 * 60 * 60
 # The longest one reader may hold a switch's lock; a crashed worker's lock
 # then expires on its own.
-LOCK_SECONDS = 30
+LOCK_SECONDS = 60
+
+# The most switches read at once.
+MAX_THREADS = 8
 
 LEGACY_NOT_WRITTEN = "dashboard reads for this switch are not written yet"
 
@@ -116,19 +120,22 @@ def _scrub(text, community):
     return str(text).replace(community, "[community]") if community else str(text)
 
 
-def _read_or_none(read, what, notes, community):
+def _read_or_none(read, what, notes, spec, community):
     """One of the secondary reads: a switch that cannot give it (a model that
     does not support it, or a failed read) gives None for those columns, and
     the view says so, rather than failing the whole switch."""
     try:
         return read()
-    except NetgearSwitchError as exc:
-        notes.append(f"{what} not read: {_scrub(exc, community)}")
+    except Exception as exc:  # an odd answer from the agent empties that column only
+        notes.append(f"{what} not read")
+        log.warning("switch %s (%s): %s not read: %s: %s", spec.index, spec.mgmt_host, what,
+                    type(exc).__name__, _scrub(exc, community))
         return None
 
 
-def _error_text(spec, exc, community):
-    return f"{spec.mgmt_host} did not answer: {type(exc).__name__}: {_scrub(exc, community)}"
+def _detail(exc, community):
+    """The full, scrubbed text of an exception: for the log, never for a view."""
+    return f"{type(exc).__name__}: {_scrub(exc, community)}"
 
 
 def _lldp_by_port(neighbors):
@@ -180,30 +187,37 @@ def _spec_for(index):
 
 
 def _read_spec(spec):
-    community = switch_community(spec)
     now = _now().isoformat()
     view = SwitchView(index=spec.index, name=f"switch {spec.index}", model=spec.model,
                       reachable=False, error="", read_at=now)
+    try:
+        community = switch_community(spec)
+    except PoeConfigError as exc:  # this switch is not fully configured; the others still are read
+        view.error = "community not configured"
+        log.warning("switch %s (%s): %s", spec.index, spec.mgmt_host, exc)
+        return view
     try:
         client = NetsnmpCliClient(spec.mgmt_host, community,
                                   timeout=SNMP_TIMEOUT, retries=SNMP_RETRIES)
         sw = library_switch(spec, snmp_client=client)
         ports = sw.get_ports()
     except Exception as exc:  # a timeout or any library error: the switch is not answering
-        view.error = _error_text(spec, exc, community)
-        log.warning("switch %s: %s", spec.index, view.error)
+        view.error = "not answering"
+        log.warning("switch %s (%s): not answering: %s", spec.index, spec.mgmt_host, _detail(exc, community))
         return view
     notes = []
-    poe = _read_or_none(sw.get_poe, "PoE", notes, community)
-    stats = _read_or_none(sw.get_stats, "counters", notes, community)
-    lldp = _read_or_none(sw.get_lldp, "LLDP", notes, community)
-    macs = _read_or_none(sw.get_macs, "MAC table", notes, community)
+    name = _read_or_none(sw.get_hostname, "name", notes, spec, community)
+    poe = _read_or_none(sw.get_poe, "PoE", notes, spec, community)
+    stats = _read_or_none(sw.get_stats, "counters", notes, spec, community)
+    # the counters were sampled by now: this is the time their rates are worked out from
+    view.good_at = _now().isoformat()
+    lldp = _read_or_none(sw.get_lldp, "LLDP", notes, spec, community)
+    macs = _read_or_none(sw.get_macs, "MAC table", notes, spec, community)
+    if name:
+        view.name = _scrub(name, community)
     view.ports = _build_ports(ports, poe, stats, lldp, macs)
     view.reachable = True
-    view.good_at = now
     view.error = "; ".join(notes)
-    if notes:
-        log.warning("switch %s: %s", spec.index, view.error)
     return view
 
 
@@ -217,15 +231,23 @@ def read_switch(index):
 
     Never raises for a switch that does not answer: that is a view with
     reachable=False. Raises PoeRequestError for an index that is not
-    configured and PoeConfigError for a missing community."""
+    configured. A switch with no community is a view with that error."""
     return _read_spec(_spec_for(index))
+
+
+def _concurrently(read, specs):
+    """read(spec) for every spec, at the same time (a read is a few seconds of
+    waiting on net-snmp processes), results in the order of specs. The first
+    exception, if any, is raised once all are done."""
+    with ThreadPoolExecutor(max_workers=min(len(specs), MAX_THREADS)) as pool:
+        return list(pool.map(read, specs))
 
 
 def read_all():
     """Every configured switch, in index order."""
     specs = sorted(configured_specs(), key=lambda s: s.index)
     if specs:
-        return [_read_spec(s) for s in specs]
+        return _concurrently(_read_spec, specs)
     if legacy_configured():
         return [_legacy_view()]
     raise PoeConfigError("no switches are configured: set FPGAS_SWITCHES_CONFIG")
@@ -235,7 +257,12 @@ def read_all():
 
 
 def _from_dict(d):
-    return SwitchView(**{**d, "ports": [PortView(**p) for p in d["ports"]]})
+    """A cached view, or None for an entry this code cannot read (written by
+    another version): it is treated as a miss and read afresh."""
+    try:
+        return SwitchView(**{**d, "ports": [PortView(**p) for p in d["ports"]]})
+    except (TypeError, KeyError, AttributeError):
+        return None
 
 
 def _seconds_between(earlier, later):
@@ -262,18 +289,21 @@ def _stale(new, old):
     for p in old.ports:  # the old rates describe a moment that has passed
         p.rx_bps = p.tx_bps = None
     return SwitchView(index=new.index, name=old.name, model=old.model, reachable=False,
-                      error=f"not answering since {since}: {new.error}",
+                      error=f"not answering since {since}",
                       read_at=new.read_at, ports=old.ports, good_at=old.good_at)
 
 
-def _cached_switch(cache, spec, ttl):
-    key = f"dashboard:switch:{spec.index}"
-    lock = f"dashboard:lock:{spec.index}"
+def _cached_switch(cache, ttl, spec):
+    key = f"dashboard:v1:switch:{spec.index}"
+    lock = f"dashboard:v1:lock:{spec.index}"
     entry = cache.get(key)
     old = _from_dict(entry) if entry else None
-    if old is not None and (_now() - datetime.fromisoformat(old.read_at)).total_seconds() < ttl:
-        return old
-    if not cache.add(lock, 1, LOCK_SECONDS):
+    if old is not None:
+        age = (_now() - datetime.fromisoformat(old.read_at)).total_seconds()
+        if 0 <= age < ttl:
+            return old
+    token = uuid.uuid4().hex
+    if not cache.add(lock, token, LOCK_SECONDS):
         # another caller is reading this switch: give the last read
         return old or SwitchView(index=spec.index, name=f"switch {spec.index}", model=spec.model,
                                  reachable=False, error="first read in progress",
@@ -287,17 +317,19 @@ def _cached_switch(cache, spec, ttl):
         cache.set(key, asdict(new), KEEP_SECONDS)
         return new
     finally:
-        cache.delete(lock)
+        if cache.get(lock) == token:  # not one a later reader took after ours expired
+            cache.delete(lock)
 
 
 def cached_read_all(cache, ttl=DEFAULT_TTL):
     """read_all() through `cache` (a Django cache: the site passes caches["poe"]).
 
-    One entry per switch, read at most once per `ttl` seconds; a caller that
-    finds another caller reading a switch gets that switch's last read. Rates
-    are worked out from the previous read of the same switch, and a switch
-    that stops answering keeps its last good ports."""
+    One entry per switch, read at most once per `ttl` seconds, the switches
+    that need a read at the same time; a caller that finds another caller
+    reading a switch gets that switch's last read. Rates are worked out from
+    the previous read of the same switch, and a switch that stops answering
+    keeps its last good ports."""
     specs = sorted(configured_specs(), key=lambda s: s.index)
     if not specs:
         return read_all()
-    return [_cached_switch(cache, s, ttl) for s in specs]
+    return _concurrently(lambda spec: _cached_switch(cache, ttl, spec), specs)

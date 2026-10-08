@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 from django.core.cache.backends.locmem import LocMemCache
+from netgear_switch.errors import UnsupportedCapabilityError
 from netgear_switch.virtual.server import VirtualSwitch
 
 from snmp_switch import dashboard
@@ -174,7 +175,9 @@ def test_an_unreachable_switch_is_a_view_not_an_exception(monkeypatch, tmp_path,
         view = dashboard.read_switch(1)
     assert not view.reachable
     assert view.ports == []
-    assert "127.0.0.1:1" in view.error
+    assert view.error == "not answering"
+    assert "127.0.0.1" not in json.dumps(asdict(view))
+    assert "127.0.0.1:1" in caplog.text  # the detail is for the journal
     assert COMMUNITY not in view.error
     assert COMMUNITY not in json.dumps(asdict(view))
     assert COMMUNITY not in caplog.text
@@ -192,40 +195,106 @@ def test_library_error_text_with_the_community_is_scrubbed(monkeypatch, tmp_path
     with caplog.at_level(logging.DEBUG):
         view = dashboard.read_switch(1)
     assert not view.reachable
-    assert "192.0.2.1" in view.error and "[community]" in view.error
+    assert view.error == "not answering"
+    assert "192.0.2.1" in caplog.text and "[community]" in caplog.text
     assert COMMUNITY not in view.error and COMMUNITY not in caplog.text
 
 
-def test_one_secondary_read_that_fails_leaves_the_rest_of_the_switch(monkeypatch, tmp_path):
-    """A model that cannot give one of the reads has None for those columns,
-    and the view says so, but the switch is still shown."""
-    from netgear_switch.errors import UnsupportedCapabilityError
+@pytest.mark.parametrize("method, error, what, check", [
+    ("get_lldp", UnsupportedCapabilityError, "LLDP", lambda p: p.lldp_name is None and p.poe_state == "delivering"),
+    # not a library error: an odd answer from the agent
+    ("get_stats", ValueError, "counters", lambda p: p.rx_bytes is None and p.poe_state == "delivering"),
+    ("get_poe", ValueError, "PoE", lambda p: p.poe_state is None and p.poe_watts is None and p.rx_bytes is not None),
+    ("get_macs", KeyError, "MAC table", lambda p: p.macs == [] and p.poe_state == "delivering"),
+])
+def test_one_secondary_read_that_fails_leaves_the_rest_of_the_switch(monkeypatch, tmp_path, caplog,
+                                                                      method, error, what, check):
+    """A switch that cannot give one of the reads, for whatever reason, has
+    None for those columns and says so, but the switch is still shown."""
     from netgear_switch.sync_api import SyncSwitch
 
     vs = serve("gsm7252ps")
     try:
         configure(monkeypatch, tmp_path, (1, "gsm7252ps", vs))
 
-        def no_lldp(self, **kwargs):
-            raise UnsupportedCapabilityError(f"no LLDP here ({COMMUNITY})")
+        def broken(self, **kwargs):
+            raise error(f"odd answer ({COMMUNITY})")
 
-        monkeypatch.setattr(SyncSwitch, "get_lldp", no_lldp)
-        view = dashboard.read_switch(1)
+        monkeypatch.setattr(SyncSwitch, method, broken)
+        with caplog.at_level(logging.DEBUG):
+            view = dashboard.read_switch(1)
     finally:
         vs.stop()
     assert view.reachable
-    assert "LLDP not read" in view.error and COMMUNITY not in view.error
-    p = next(p for p in view.ports if p.port == 1)
-    assert p.poe_state == "delivering" and p.lldp_name is None
+    assert view.error == f"{what} not read"
+    assert COMMUNITY not in json.dumps(asdict(view)) and COMMUNITY not in caplog.text
+    assert "[community]" in caplog.text
+    assert check(next(p for p in view.ports if p.port == 1))
 
 
-def test_an_unknown_switch_or_no_community_is_refused(monkeypatch, tmp_path):
+def test_the_poe_disabled_state(monkeypatch, tmp_path):
+    vs = serve("gsm7252ps")
+    try:
+        configure(monkeypatch, tmp_path, (1, "gsm7252ps", vs))
+        vs.state.poe[1].detect = 1  # RFC 3621 disabled
+        refresh(vs)
+        view = dashboard.read_switch(1)
+    finally:
+        vs.stop()
+    assert next(p for p in view.ports if p.port == 1).poe_state == "disabled"
+
+
+def test_the_name_is_the_switchs_sysname(welland):
+    assert [v.name for v in welland[1]] == ["sw-netgear-gsm7252ps-s1.welland.mithis.com", "sw-netgear-s3300-1"]
+
+
+def test_the_name_falls_back_to_the_index(monkeypatch, tmp_path):
+    from netgear_switch.sync_api import SyncSwitch
+
+    vs = serve("gsm7252ps")
+    try:
+        configure(monkeypatch, tmp_path, (1, "gsm7252ps", vs))
+        monkeypatch.setattr(SyncSwitch, "get_hostname", lambda self, **kw: (_ for _ in ()).throw(ValueError("x")))
+        view = dashboard.read_switch(1)
+    finally:
+        vs.stop()
+    assert view.reachable and view.name == "switch 1" and view.error == "name not read"
+
+
+def test_an_unknown_switch_is_refused_and_a_missing_community_is_a_view(monkeypatch, tmp_path, caplog):
     cfg = write_switches(tmp_path, (1, "gsm7252ps", "192.0.2.1:161"))
     monkeypatch.setenv("FPGAS_SWITCHES_CONFIG", str(cfg))
     with pytest.raises(PoeRequestError, match="switch 7 is not configured"):
         dashboard.read_switch(7)
-    with pytest.raises(PoeConfigError, match="no SNMP community for switch 1"):
-        dashboard.read_switch(1)
+    with caplog.at_level(logging.DEBUG):
+        view = dashboard.read_switch(1)
+    assert not view.reachable and view.error == "community not configured"
+    assert "192.0.2.1" not in json.dumps(asdict(view))
+    assert "no SNMP community for switch 1" in caplog.text
+
+
+def test_one_switch_without_a_community_does_not_hide_the_others(monkeypatch, tmp_path):
+    vs = serve("gsm7252ps")
+    try:
+        cfg = write_switches(tmp_path, (1, "gsm7252ps", "192.0.2.1:161"), (2, "gsm7252ps", f"{vs.host}:{vs.port}"))
+        monkeypatch.setenv("FPGAS_SWITCHES_CONFIG", str(cfg))
+        monkeypatch.setenv("FPGAS_SWITCH_COMMUNITY_2", COMMUNITY)
+        one, two = dashboard.read_all()
+        cached = dashboard.cached_read_all(LocMemCache("partial", {}), ttl=15)
+    finally:
+        vs.stop()
+    assert (one.index, one.reachable, one.error) == (1, False, "community not configured")
+    assert two.index == 2 and two.reachable and len(two.ports) == 52
+    assert [v.index for v in cached] == [1, 2] and cached[1].reachable
+
+
+def test_no_management_host_is_in_any_view(monkeypatch, tmp_path):
+    """The page is public: not the address of a switch, whatever went wrong."""
+    cfg = write_switches(tmp_path, (1, "gsm7252ps", "192.0.2.1:161"), (2, "gsm7252ps", "127.0.0.1:1"))
+    monkeypatch.setenv("FPGAS_SWITCHES_CONFIG", str(cfg))
+    monkeypatch.setenv("FPGAS_SWITCH_COMMUNITY_2", COMMUNITY)
+    text = json.dumps([asdict(v) for v in dashboard.read_all()])
+    assert "192.0.2.1" not in text and "127.0.0.1" not in text
 
 
 def test_nothing_configured_is_a_config_error():
@@ -360,14 +429,14 @@ def test_rates_come_from_the_previous_cached_read(head, cache, clock, reads):
 def test_a_caller_that_loses_the_lock_gets_the_last_read(head, cache, clock, reads):
     first = dashboard.cached_read_all(cache, ttl=15)[0]
     clock.advance(30)  # stale, so a read is due
-    assert cache.add("dashboard:lock:1", 1, 30)  # another worker is reading
+    assert cache.add("dashboard:v1:lock:1", 1, 30)  # another worker is reading
     got = dashboard.cached_read_all(cache, ttl=15)[0]
     assert reads == [1]  # this caller did not read
     assert got == first
-    cache.delete("dashboard:lock:1")
+    cache.delete("dashboard:v1:lock:1")
     dashboard.cached_read_all(cache, ttl=15)
     assert reads == [1, 1]
-    assert cache.add("dashboard:lock:1", 1, 30)  # and its own lock was let go
+    assert cache.add("dashboard:v1:lock:1", 1, 30)  # and its own lock was let go
 
 
 def test_the_lock_is_let_go_when_a_read_fails(head, cache, clock, monkeypatch):
@@ -377,11 +446,11 @@ def test_the_lock_is_let_go_when_a_read_fails(head, cache, clock, monkeypatch):
     monkeypatch.setattr(dashboard, "_read_spec", broken)
     with pytest.raises(RuntimeError):
         dashboard.cached_read_all(cache, ttl=15)
-    assert cache.add("dashboard:lock:1", 1, 30)
+    assert cache.add("dashboard:v1:lock:1", 1, 30)
 
 
 def test_losing_the_lock_with_nothing_cached_says_so(head, cache, clock, reads):
-    assert cache.add("dashboard:lock:1", 1, 30)
+    assert cache.add("dashboard:v1:lock:1", 1, 30)
     (view,) = dashboard.cached_read_all(cache, ttl=15)
     assert reads == []
     assert not view.reachable and view.error == "first read in progress"
@@ -394,7 +463,7 @@ def test_a_dead_switch_keeps_its_last_good_ports(head, cache, clock, reads):
     clock.advance(60)
     dead = dashboard.cached_read_all(cache, ttl=15)[0]
     assert not dead.reachable
-    assert dead.error.startswith("not answering since 12:00:00")
+    assert dead.error == "not answering since 12:00:00"
     assert COMMUNITY not in dead.error
     assert [asdict(p) for p in dead.ports] == [asdict(p) | {"rx_bps": None, "tx_bps": None} for p in good.ports]
     assert dead.good_at == good.good_at
@@ -403,7 +472,7 @@ def test_a_dead_switch_keeps_its_last_good_ports(head, cache, clock, reads):
     clock.advance(5)
     again = dashboard.cached_read_all(cache, ttl=15)[0]
     assert reads == [1, 1]
-    assert again.error.startswith("not answering since 12:00:00")
+    assert again.error == "not answering since 12:00:00"
     assert COMMUNITY not in json.dumps(asdict(again))
 
 
@@ -414,3 +483,45 @@ def test_a_dead_switch_never_seen_has_no_ports(monkeypatch, tmp_path, cache, clo
     (view,) = dashboard.cached_read_all(cache, ttl=15)
     assert not view.reachable and view.ports == []
     assert COMMUNITY not in view.error
+
+
+def test_an_entry_this_code_cannot_read_is_a_miss(head, cache, clock, reads):
+    key = "dashboard:v1:switch:1"
+    cache.set(key, {"index": 1, "a_field_from_another_version": True, "ports": []}, 60)
+    (view,) = dashboard.cached_read_all(cache, ttl=15)
+    assert reads == [1] and view.reachable
+
+
+def test_an_entry_from_the_future_is_not_fresh(head, cache, clock, reads):
+    dashboard.cached_read_all(cache, ttl=15)
+    clock.advance(-100)  # the clock stepped back
+    dashboard.cached_read_all(cache, ttl=15)
+    assert reads == [1, 1]
+
+
+def test_a_lock_a_later_reader_took_is_not_deleted(head, cache, clock, monkeypatch):
+    real = dashboard._read_spec
+
+    def slow(spec):  # our lock expired while we read, and another worker took its own
+        cache.set("dashboard:v1:lock:1", "someone else", 60)
+        return real(spec)
+
+    monkeypatch.setattr(dashboard, "_read_spec", slow)
+    dashboard.cached_read_all(cache, ttl=15)
+    assert cache.get("dashboard:v1:lock:1") == "someone else"
+
+
+def test_switches_are_read_at_the_same_time(monkeypatch, tmp_path, cache, clock):
+    import threading
+
+    cfg = write_switches(tmp_path, (1, "gsm7252ps", "192.0.2.1:161"), (2, "gsm7252ps", "192.0.2.2:161"))
+    monkeypatch.setenv("FPGAS_SWITCHES_CONFIG", str(cfg))
+    barrier = threading.Barrier(2, timeout=10)  # passes only if both reads are running at once
+
+    def meet(spec):
+        barrier.wait()
+        return dashboard.SwitchView(index=spec.index, name="x", model="m", reachable=True, error="",
+                                    read_at=clock().isoformat(), good_at=clock().isoformat())
+
+    monkeypatch.setattr(dashboard, "_read_spec", meet)
+    assert [v.index for v in dashboard.cached_read_all(cache, ttl=15)] == [1, 2]
