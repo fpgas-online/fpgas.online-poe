@@ -167,15 +167,40 @@ def open_port(ref):
         params = mk_params()
         params["port"] = str(ref.port)
         return LegacyPort(params)
-    spec = ref.spec
+    return LibraryPort(library_switch(ref.spec), ref.port)
+
+
+def switch_community(spec):
+    """The SNMP community for the switch `spec` describes, from the
+    environment. Raises PoeConfigError (naming the variables, never a
+    value) when there is none."""
     community = (os.environ.get(f"{COMMUNITY_ENV}_{spec.index}")
                  or os.environ.get(COMMUNITY_ENV))
     if not community:
         raise PoeConfigError(
             f"no SNMP community for switch {spec.index}: "
             f"set {COMMUNITY_ENV}_{spec.index} or {COMMUNITY_ENV}")
+    return community
+
+
+def library_switch(spec, snmp_client=None):
+    """A SyncSwitch for the switch `spec` describes. `snmp_client` replaces
+    the library's default read client (a reader that wants its own timeout)."""
+    community = switch_community(spec)
     # one community serves both read and write on these switches; SyncSwitch
     # wants it under both names or refuses to write (see switch_setup.cli)
-    sw = SyncSwitch(get_model(spec.model), spec.mgmt_host,
-                    snmp_community=community, snmp_write_community=community)
-    return LibraryPort(sw, ref.port)
+    return SyncSwitch(get_model(spec.model), spec.mgmt_host, snmp_client=snmp_client,
+                      snmp_community=community, snmp_write_community=community)
+
+
+def configured_specs():
+    """The per-port-VLAN switches this host is configured for, in the file's
+    order; [] when the file is not configured (the legacy scheme or nothing)."""
+    if CONFIG_ENV not in os.environ:
+        return []
+    return load_specs(os.environ[CONFIG_ENV])
+
+
+def legacy_configured():
+    """Whether this host has the legacy single SNMPv3 switch and no switches file."""
+    return CONFIG_ENV not in os.environ and bool(os.environ.get(LEGACY_HOST_ENV))
