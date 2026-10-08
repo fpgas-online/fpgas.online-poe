@@ -525,3 +525,14 @@ def test_switches_are_read_at_the_same_time(monkeypatch, tmp_path, cache, clock)
 
     monkeypatch.setattr(dashboard, "_read_spec", meet)
     assert [v.index for v in dashboard.cached_read_all(cache, ttl=15)] == [1, 2]
+
+
+def test_only_front_panel_ports_are_shown():
+    # A real GSM7252PS lists its CPU interface (ifIndex 417), LAGs (418..) and VLAN routing interfaces in ifTable
+    # too (welland walk, 2026-10-09); they are not ports.
+    from netgear_switch.models import PortStatus
+
+    ifs = [PortStatus(port=n, name=name, admin_enabled=True, link_up=True, speed_mbps=1000)
+           for n, name in ((1, "1/0/1"), (52, "1/0/52"), (417, "CPU Interface:  0/5/1"), (418, "lag 1"))]
+    views = dashboard._build_ports(ifs, None, None, None, None, port_count=52)
+    assert [v.port for v in views] == [1, 52]

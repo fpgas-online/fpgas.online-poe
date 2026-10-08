@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
+from netgear_switch import get_model
 from netgear_switch.models import PoEDetect
 from netgear_switch.transport.sync.snmp_netsnmp_cli import NetsnmpCliClient
 
@@ -149,7 +150,9 @@ def _poe_watts(status):
     return None if status.power_mw is None else status.power_mw / 1000
 
 
-def _build_ports(ports, poe, stats, lldp, macs):
+def _build_ports(ports, poe, stats, lldp, macs, port_count):
+    """One PortView per front-panel port, 1..port_count. ifTable also lists the CPU interface, the LAGs and the
+    VLAN routing interfaces (ifIndex 400 and up on these models): they are not ports, and are left out."""
     poe = {p.port: p for p in poe or []}
     stats = {s.port: s for s in stats or []}
     lldp = _lldp_by_port(lldp or [])
@@ -157,7 +160,7 @@ def _build_ports(ports, poe, stats, lldp, macs):
     for m in macs or []:
         mac_lists.setdefault(m.port, set()).add(m.mac)
     views = []
-    for p in sorted(ports, key=lambda p: p.port):
+    for p in sorted((p for p in ports if 1 <= p.port <= port_count), key=lambda p: p.port):
         v = PortView(port=p.port, label=p.description, link_up=p.link_up,
                      speed_mbps=p.speed_mbps if p.link_up else None)
         if p.port in poe:
@@ -215,7 +218,7 @@ def _read_spec(spec):
     macs = _read_or_none(sw.get_macs, "MAC table", notes, spec, community)
     if name:
         view.name = _scrub(name, community)
-    view.ports = _build_ports(ports, poe, stats, lldp, macs)
+    view.ports = _build_ports(ports, poe, stats, lldp, macs, get_model(spec.model).port_count)
     view.reachable = True
     view.error = "; ".join(notes)
     return view
