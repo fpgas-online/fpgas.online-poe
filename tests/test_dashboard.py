@@ -153,10 +153,55 @@ def test_counters_and_errors_are_kept_raw(welland):
     assert all(p.rx_bps is None and p.tx_bps is None for p in welland[1][0].ports)
 
 
+def test_an_access_port_has_its_pvid_and_one_untagged_vlan(welland):
+    for switch, number, vlan in [(1, 1, 90), (1, 45, 20), (2, 1, 21), (2, 48, 121)]:
+        p = port(welland, switch, number)
+        assert (p.pvid, p.untagged_vlans, p.tagged_vlans) == (vlan, [vlan], [])
+    assert port(welland, 1, 48).pvid == 5 and port(welland, 1, 48).tagged_vlans == []
+
+
+def test_a_trunk_port_has_tagged_vlans_sorted(welland):
+    p = port(welland, 1, 49)  # the uplink to the head switch
+    assert p.pvid == 1 and p.untagged_vlans == [1]
+    assert p.tagged_vlans == [4, 5, 6, 10, 20, 41, 90, 99, 121, 141]
+    p = port(welland, 2, 51)  # the uplink to the other welland switch
+    assert (p.pvid, p.untagged_vlans, p.tagged_vlans) == (1, [1], [5, 121])
+    p = port(welland, 1, 47)  # a port's PVID need not be VLAN 1
+    assert p.pvid == 5 and p.untagged_vlans == [5] and 5 not in p.tagged_vlans
+
+
+def test_a_port_can_send_one_vlan_untagged_and_others_tagged(welland):
+    p = port(welland, 1, 11)
+    assert (p.pvid, p.untagged_vlans, p.tagged_vlans) == (4, [4], [5, 10, 20, 90, 99])
+
+
+def test_untagged_bits_of_non_members_are_not_counted(welland):
+    # the seed copies a real GSM7252PS, whose VLAN 6 untagged bitmap has bits for ports 1-45 that are not
+    # members of it: those ports do not send VLAN 6 at all
+    assert all(6 not in port(welland, 1, n).untagged_vlans for n in range(1, 46))
+
+
+def test_every_front_panel_port_has_a_pvid(welland):
+    for ports in welland[0].values():
+        assert all(p.pvid is not None for p in ports.values())
+
+
+def test_the_switch_lists_its_vlans(welland):
+    one, two = welland[1]
+    assert [v["vlan_id"] for v in one.vlans] == [1, 4, 5, 6, 7, 10, 20, 21, 41, 89, 90, 99, 121, 141]
+    assert {"vlan_id": 90, "name": "iot"} in one.vlans
+    assert two.vlans == [{"vlan_id": 1, "name": "Default"}, {"vlan_id": 5, "name": "net"},
+                         {"vlan_id": 21, "name": "fpgas"}, {"vlan_id": 121, "name": "t-fpgas"},
+                         {"vlan_id": 4089, "name": "Auto-Video"}]
+    assert all(v in {x["vlan_id"] for x in one.vlans} for p in one.ports for v in p.untagged_vlans + p.tagged_vlans)
+
+
 def test_views_are_json_able(welland):
     again = json.loads(json.dumps([asdict(v) for v in welland[1]]))
     assert again[0]["index"] == 1 and again[0]["ports"][0]["port"] == 1
     assert again[1]["ports"][0]["poe_state"] == "searching"
+    assert again[0]["ports"][0]["pvid"] == 90 and again[0]["ports"][0]["untagged_vlans"] == [90]
+    assert {"vlan_id": 90, "name": "iot"} in again[0]["vlans"]
 
 
 def test_the_community_is_in_no_view(welland):
@@ -206,6 +251,10 @@ def test_library_error_text_with_the_community_is_scrubbed(monkeypatch, tmp_path
     ("get_stats", ValueError, "counters", lambda p: p.rx_bytes is None and p.poe_state == "delivering"),
     ("get_poe", ValueError, "PoE", lambda p: p.poe_state is None and p.poe_watts is None and p.rx_bytes is not None),
     ("get_macs", KeyError, "MAC table", lambda p: p.macs == [] and p.poe_state == "delivering"),
+    ("get_pvids", ValueError, "PVID",
+     lambda p: p.pvid is None and p.untagged_vlans == [90] and p.poe_state == "delivering"),
+    ("get_vlans", UnsupportedCapabilityError, "VLANs",
+     lambda p: p.pvid == 90 and p.untagged_vlans == [] and p.tagged_vlans == [] and p.poe_state == "delivering"),
 ])
 def test_one_secondary_read_that_fails_leaves_the_rest_of_the_switch(monkeypatch, tmp_path, caplog,
                                                                       method, error, what, check):
@@ -429,14 +478,14 @@ def test_rates_come_from_the_previous_cached_read(head, cache, clock, reads):
 def test_a_caller_that_loses_the_lock_gets_the_last_read(head, cache, clock, reads):
     first = dashboard.cached_read_all(cache, ttl=15)[0]
     clock.advance(30)  # stale, so a read is due
-    assert cache.add("dashboard:v1:lock:1", 1, 30)  # another worker is reading
+    assert cache.add("dashboard:v2:lock:1", 1, 30)  # another worker is reading
     got = dashboard.cached_read_all(cache, ttl=15)[0]
     assert reads == [1]  # this caller did not read
     assert got == first
-    cache.delete("dashboard:v1:lock:1")
+    cache.delete("dashboard:v2:lock:1")
     dashboard.cached_read_all(cache, ttl=15)
     assert reads == [1, 1]
-    assert cache.add("dashboard:v1:lock:1", 1, 30)  # and its own lock was let go
+    assert cache.add("dashboard:v2:lock:1", 1, 30)  # and its own lock was let go
 
 
 def test_the_lock_is_let_go_when_a_read_fails(head, cache, clock, monkeypatch):
@@ -446,11 +495,11 @@ def test_the_lock_is_let_go_when_a_read_fails(head, cache, clock, monkeypatch):
     monkeypatch.setattr(dashboard, "_read_spec", broken)
     with pytest.raises(RuntimeError):
         dashboard.cached_read_all(cache, ttl=15)
-    assert cache.add("dashboard:v1:lock:1", 1, 30)
+    assert cache.add("dashboard:v2:lock:1", 1, 30)
 
 
 def test_losing_the_lock_with_nothing_cached_says_so(head, cache, clock, reads):
-    assert cache.add("dashboard:v1:lock:1", 1, 30)
+    assert cache.add("dashboard:v2:lock:1", 1, 30)
     (view,) = dashboard.cached_read_all(cache, ttl=15)
     assert reads == []
     assert not view.reachable and view.error == "first read in progress"
@@ -486,10 +535,34 @@ def test_a_dead_switch_never_seen_has_no_ports(monkeypatch, tmp_path, cache, clo
 
 
 def test_an_entry_this_code_cannot_read_is_a_miss(head, cache, clock, reads):
-    key = "dashboard:v1:switch:1"
+    key = "dashboard:v2:switch:1"
     cache.set(key, {"index": 1, "a_field_from_another_version": True, "ports": []}, 60)
     (view,) = dashboard.cached_read_all(cache, ttl=15)
     assert reads == [1] and view.reachable
+
+
+def test_an_entry_cached_before_the_vlan_fields_still_reads():
+    old = {"index": 1, "name": "n", "model": "m", "reachable": True, "error": "", "read_at": "2026-10-09T12:00:00+09:30",
+           "good_at": None, "ports": [{"port": 1, "label": "x", "link_up": True}]}
+    view = dashboard._from_dict(old)
+    assert view.vlans == [] and view.ports[0].pvid is None
+    assert view.ports[0].untagged_vlans == [] and view.ports[0].tagged_vlans == []
+
+
+def test_a_v1_cache_entry_is_not_served(head, cache, clock, reads):
+    cache.set("dashboard:v1:switch:1", asdict(dashboard.SwitchView(
+        index=1, name="old", model="gsm7252ps", reachable=True, error="", read_at=clock().isoformat())), 60)
+    (view,) = dashboard.cached_read_all(cache, ttl=15)
+    assert reads == [1] and view.name != "old"
+
+
+def test_a_dead_switch_keeps_its_vlans_too(head, cache, clock):
+    good = dashboard.cached_read_all(cache, ttl=15)[0]
+    head.stop()
+    clock.advance(60)
+    dead = dashboard.cached_read_all(cache, ttl=15)[0]
+    assert dead.vlans == good.vlans and dead.vlans != []
+    assert dead.ports[0].pvid == 90
 
 
 def test_an_entry_from_the_future_is_not_fresh(head, cache, clock, reads):
@@ -503,12 +576,12 @@ def test_a_lock_a_later_reader_took_is_not_deleted(head, cache, clock, monkeypat
     real = dashboard._read_spec
 
     def slow(spec):  # our lock expired while we read, and another worker took its own
-        cache.set("dashboard:v1:lock:1", "someone else", 60)
+        cache.set("dashboard:v2:lock:1", "someone else", 60)
         return real(spec)
 
     monkeypatch.setattr(dashboard, "_read_spec", slow)
     dashboard.cached_read_all(cache, ttl=15)
-    assert cache.get("dashboard:v1:lock:1") == "someone else"
+    assert cache.get("dashboard:v2:lock:1") == "someone else"
 
 
 def test_switches_are_read_at_the_same_time(monkeypatch, tmp_path, cache, clock):
