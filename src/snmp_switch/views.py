@@ -2,6 +2,7 @@ import functools
 import json
 import logging
 import time
+import unicodedata
 
 from asgiref.sync import async_to_sync
 
@@ -157,3 +158,74 @@ def toggle(ref):
             status=502)
 
     return JsonResponse({port: [off, on]})
+
+
+# The most characters of a client's user agent or address that are logged.
+MAX_UA = 200
+MAX_ADDRESS = 64
+
+
+def _printable(text, limit):
+    """`text` with control characters (and line or paragraph separators)
+    removed, cut to `limit` characters: what a client sends is logged, so it
+    must not be able to start a line of its own."""
+    clean = ''.join(c for c in text if unicodedata.category(c) not in ('Cc', 'Cf', 'Zl', 'Zp'))
+    return clean[:limit]
+
+
+def client_address(request):
+    """The address the request came from, for the log.
+
+    The site's nginx (``include proxy_params``, the Debian file) sets
+    ``X-Real-IP`` to the connecting peer ($remote_addr), overwriting any such
+    header the client sent, and ``X-Forwarded-For`` to the client's own header
+    *plus* the peer ($proxy_add_x_forwarded_for): so the first entry of
+    X-Forwarded-For is whatever the client chose to write, and cannot be
+    trusted. The gunicorn socket is a unix socket, so only nginx can set
+    these. X-Real-IP is used; REMOTE_ADDR (which is no address at all behind a
+    unix socket) is the fallback for a request that did not come through
+    nginx, such as the test client."""
+    address = request.META.get('HTTP_X_REAL_IP') or request.META.get('REMOTE_ADDR') or ''
+    return _printable(address.strip(), MAX_ADDRESS) or '-'
+
+
+def client_agent(request):
+    return _printable(request.META.get('HTTP_USER_AGENT', ''), MAX_UA) or '-'
+
+
+def log_power(ref, on, request, result):
+    """The one INFO line for a power request: there is no login, so who is
+    the client address and what it said it was."""
+    log.info("poe %s switch=%s port=%s from=%s ua=%s result=%s",
+             'on' if on else 'off', ref.switch if ref.switch is not None else '-', ref.port,
+             client_address(request), client_agent(request), result)
+
+
+@poe_view(with_request=True)
+def power(ref, request, body):
+    # switch the port on or off (not a cycle), at most once per interval,
+    # sharing toggle's limit: the dashboard's PoE switch
+    on = body.get('on')
+    if not isinstance(on, bool):
+        raise PoeRequestError("'on' must be true or false")
+
+    wait = seconds_until_toggle_allowed(ref)
+    if wait:
+        log_power(ref, on, request, f'rate-limited {wait}s')
+        response = JsonResponse(
+            {'error': f'{ref} was switched a moment ago; try again in {wait} seconds. '
+                      f'Nothing was sent to the switch'},
+            status=429)
+        response['Retry-After'] = str(wait)
+        return response
+
+    try:
+        state = open_port(ref).set(on)
+    except Exception as e:
+        # nothing is known to have happened: someone may try again at once
+        release_toggle_claim(ref)
+        log_power(ref, on, request, f'error {type(e).__name__}')
+        raise
+    log_power(ref, on, request, state)
+    notify_dcws(ref.port, "set", state)
+    return JsonResponse({'state': state})
