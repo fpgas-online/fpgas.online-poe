@@ -7,10 +7,13 @@ is replaced by the real class with ``runner=`` set to a WalkRunner
 (tests/walk_runner.py), so everything above the process boundary (the client's
 argv and parsing, netgear_switch, the reader's joins) is the real code.
 
-The fixtures hold OID lines only: no community, no IPv4 address, and the
-gateway's LLDP name replaced with gateway.invalid. Two recorded strings were
-dropped for that: the management address inside switch 1's sysDescr and a
-firmware version string on switch 2 that reads like an address.
+The fixtures hold OID lines only: no community and no IPv4 address. Names are
+the ones the public dashboard may show (fleet Pis, the switches' own sysNames)
+or stand-ins: the gateway is "<role>.gateway" in its port labels and
+gateway.invalid as an LLDP name, two private devices are "dev-device" and
+"house-device". Two recorded strings were dropped: the management address inside
+switch 1's sysDescr and a firmware version string on switch 2 that reads like an
+address. Real Pi MAC addresses are kept; the public page shows them too.
 """
 
 import re
