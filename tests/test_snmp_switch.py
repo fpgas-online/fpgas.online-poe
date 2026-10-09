@@ -498,11 +498,39 @@ def test_a_malformed_request_is_a_clean_400(switch_2_untouchable, path, body):
     assert r.json()["error"]
 
 
-@pytest.mark.parametrize("path", ["/status", "/toggle"])
+@pytest.mark.parametrize("path", ["/status", "/toggle", "/power"])
 def test_a_body_that_is_not_json_is_a_clean_400(switch_2_untouchable, path):
-    r = Client().post(path, data="port=3&switch=2", content_type="application/x-www-form-urlencoded")
+    r = Client().post(path, data="port=3&switch=2", content_type="application/json")
     assert r.status_code == 400
     assert "expected a JSON body" in r.json()["error"]
+
+
+# --- cross-site requests: refused before anything is read (the coordinator, 2026-10-09) ---
+
+BODY = json.dumps({"switch": 2, "port": 3, "on": False})
+
+
+@pytest.mark.parametrize("path", ["/status", "/toggle", "/power"])
+@pytest.mark.parametrize("content_type", ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data"])
+def test_a_cross_site_form_or_text_post_is_refused(switch_2_untouchable, path, content_type):
+    """What a page on another site can send without a preflight: no JSON content type."""
+    r = Client().generic("POST", path, BODY, content_type=content_type, HTTP_SEC_FETCH_SITE="cross-site")
+    assert r.status_code == 403 and "nothing was sent to the switch" in r.json()["error"]
+
+
+@pytest.mark.parametrize("path", ["/status", "/toggle", "/power"])
+@pytest.mark.parametrize("site", ["cross-site", "same-site", "none"])
+def test_a_json_post_from_anywhere_but_our_own_pages_is_refused(switch_2_untouchable, path, site):
+    r = Client().post(path, BODY, content_type="application/json", HTTP_SEC_FETCH_SITE=site)
+    assert r.status_code == 403 and site in r.json()["error"]
+
+
+@pytest.mark.parametrize("site", [{"HTTP_SEC_FETCH_SITE": "same-origin"}, {}])
+def test_the_sites_own_fetch_and_a_tool_on_the_host_get_through(switch_2, site):
+    """Our pages' fetch (same-origin, JSON) and a direct call with no Sec-Fetch-Site reach the policy and the switch."""
+    r = Client().post("/power", BODY, content_type="application/json; charset=UTF-8", **site)
+    assert (r.status_code, r.json()) == (200, {"state": "off"})
+    assert switch_2.state.poe[3].admin is False
 
 
 @pytest.mark.parametrize("path", ["/status", "/toggle"])
@@ -704,3 +732,14 @@ def test_a_request_that_never_got_to_a_write_is_not_logged_as_one(legacy_switch,
     caplog.set_level(logging.INFO)
     power(body)
     assert poe_lines(caplog) == []
+
+
+def test_a_write_that_fails_unexpectedly_is_a_json_502_and_frees_the_port(switch_2_untouchable, monkeypatch):
+    class Broken:
+        def set(self, on):
+            raise OSError("socket gone")
+
+    monkeypatch.setattr("snmp_switch.views.open_port", lambda ref: Broken())
+    r = power({"switch": 2, "port": PORT, "on": False})
+    assert r.status_code == 502 and r.json()["error"] == "switch: the write failed (OSError); try again"
+    assert power({"switch": 2, "port": PORT, "on": False}).status_code == 502  # not 429: the claim was released

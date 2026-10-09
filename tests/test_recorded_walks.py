@@ -159,3 +159,37 @@ def test_the_runner_answers_what_a_real_agent_answers():
     assert "No Such Instance" in got.stdout.splitlines()[1]
     with pytest.raises(AssertionError):
         runner(["snmpset", "-r", "0", "host", "1.3.6.1.2.1.1.5.0"])
+
+
+PI_OUIS = {"b8:27:eb", "dc:a6:32", "e4:5f:01", "d8:3a:dd", "2c:cf:67", "28:cd:c1"}  # Raspberry Pi
+STAND_IN = "02:00:5e:00:"  # the scrubbed MACs of every other machine
+
+
+def macs(path):
+    """Every MAC in a walk: LLDP chassis IDs and the Q-BRIDGE MAC table's OID suffixes."""
+    for line in path.read_text().splitlines():
+        m = re.match(r"^\.1\.0\.8802\.1\.1\.2\.1\.4\.1\.1\.5\.[\d.]+ = Hex-STRING: ([0-9A-F ]+)$", line)
+        if m and len(m.group(1).split()) == 6:
+            yield ":".join(m.group(1).lower().split())
+        m = re.match(r"^\.1\.3\.6\.1\.2\.1\.17\.7\.1\.2\.2\.1\.2\.\d+\.((?:\d+\.){5}\d+) = ", line)
+        if m:
+            yield ":".join(f"{int(b):02x}" for b in m.group(1).split("."))
+
+
+def test_the_only_real_macs_kept_are_the_pis():
+    """A Pi's MAC is kept (a Raspberry Pi OUI, or the locally administered MAC of a fleet Orange Pi, which LLDP
+    names pi-sw<S>-p<P>); every other machine's MAC is a stand-in."""
+    pi_lldp = set()
+    for path in WALKS:
+        lines = path.read_text().splitlines()
+        names = {ln.split(" = ")[0].split("1.0.8802.1.1.2.1.4.1.1.9.")[1]: ln.split('"')[1]
+                 for ln in lines if ln.startswith(".1.0.8802.1.1.2.1.4.1.1.9.")}
+        for ln in lines:
+            if ln.startswith(".1.0.8802.1.1.2.1.4.1.1.5."):
+                key = ln.split(" = ")[0].split("1.0.8802.1.1.2.1.4.1.1.5.")[1]
+                if re.fullmatch(r"pi-sw\d+-p\d+", names.get(key, "")):
+                    pi_lldp.add(":".join(ln.split(": ", 1)[1].lower().split()))
+    seen = [mac for path in WALKS for mac in macs(path)]
+    assert seen and any(mac.startswith(STAND_IN) for mac in seen)
+    for mac in seen:
+        assert mac[:8] in PI_OUIS or mac in pi_lldp or mac.startswith(STAND_IN), mac

@@ -30,6 +30,20 @@ def not_a_board(ref):
         {'error': f'{ref} is not a board this site offers; nothing was sent to the switch'}, status=403)
 
 
+def cross_site(request):
+    """Why `request` may not switch a port, or "" when it may. The views are csrf_exempt and the pages have no login,
+    so a page on another site could otherwise POST here from a visitor's browser and leave a board powered off. A
+    browser's own fetch from our pages sends JSON and Sec-Fetch-Site: same-origin; a direct call from a tool on the
+    host sends no Sec-Fetch-Site. A cross-site form or text/plain POST has neither JSON nor a same-origin fetch
+    site, so it is refused before anything is read."""
+    if request.content_type != "application/json":
+        return "expected Content-Type: application/json"
+    site = request.headers.get("Sec-Fetch-Site")
+    if site is not None and site != "same-origin":
+        return f"refused a {site} request: PoE is switched only from this site's own pages"
+    return ""
+
+
 def poe_view(fn=None, *, with_request=False):
     """Decode the JSON body, work out the switch port it names, refuse a
     port that cannot be a board's (a trunk, an uplink, a port outside the
@@ -38,8 +52,9 @@ def poe_view(fn=None, *, with_request=False):
     bare 500: a bad request is a 400, a port the site does not offer a 403,
     an unconfigured service a 503, a switch that will not answer a 502.
 
-    The site's policy is looked up first, so a project that has none refuses
-    every request, whatever it says.
+    A cross-site request (cross_site) is refused first, with a 403, before
+    anything is read. Then the site's policy is looked up, so a project that
+    has none refuses every request, whatever it says.
 
     A view is called as ``fn(ref)``. One that also needs the request (its
     client address and user agent) and the decoded body (more fields than the
@@ -52,6 +67,9 @@ def poe_view(fn=None, *, with_request=False):
     @require_POST
     @functools.wraps(fn)
     def wrapper(request):
+        refused = cross_site(request)
+        if refused:
+            return JsonResponse({'error': f'{refused}; nothing was sent to the switch'}, status=403)
         try:
             allowed = port_policy()
             try:
@@ -225,7 +243,10 @@ def power(ref, request, body):
         # nothing is known to have happened: someone may try again at once
         release_toggle_claim(ref)
         log_power(ref, on, request, f'error {type(e).__name__}')
-        raise
+        if isinstance(e, (NetgearSwitchError, PoeConfigError, PoeRequestError)):
+            raise  # poe_view answers these (502, 503, 400)
+        log.exception("%s: switching %s failed", ref, "on" if on else "off")
+        return JsonResponse({'error': f'switch: the write failed ({type(e).__name__}); try again'}, status=502)
     log_power(ref, on, request, state)
     notify_dcws(ref.port, "set", state)
     return JsonResponse({'state': state})
