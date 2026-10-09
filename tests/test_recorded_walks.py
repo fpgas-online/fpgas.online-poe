@@ -27,7 +27,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from netgear_switch.transport.sync.snmp_netsnmp_cli import NetsnmpCliClient
+from netgear_switch.transport.sync.snmp_netsnmp_cli import NetsnmpCliClient, parse_netsnmp_lines
 
 from snmp_switch import dashboard
 from tests.test_dashboard import COMMUNITY, no_switch_env, short_timeout  # noqa: F401  (autouse fixtures)
@@ -94,6 +94,61 @@ def test_switch_2_port_7_is_a_pi_delivering_power(recorded):
     assert p.poe_state == "delivering"
     assert p.poe_watts == pytest.approx(3.6, abs=0.05)
     assert p.lldp_name == "pi-sw2-p7"
+
+
+def test_switch_1_port_10_is_in_its_own_vlan_and_in_vlan_21(recorded):
+    p = port(recorded, 1, 10)
+    assert (p.pvid, p.untagged_vlans, p.tagged_vlans) == (2110, [21, 2110], [])
+
+
+def test_switch_2_ports_7_41_and_48(recorded):
+    p = port(recorded, 2, 7)
+    assert p.pvid == 2207 and p.untagged_vlans == [21, 2207]
+    assert 5 in port(recorded, 2, 41).untagged_vlans
+    assert 121 in port(recorded, 2, 48).untagged_vlans
+
+
+def test_the_gateway_trunk_carries_every_per_port_vlan_tagged(recorded):
+    p = port(recorded, 1, 47)
+    per_port = [*range(2101, 2141), *range(2201, 2249)]
+    assert len(per_port) == 88
+    assert set(per_port) <= set(p.tagged_vlans)
+    assert p.untagged_vlans == [21]
+    # the uplink to the other switch carries switch 2's per-port VLANs tagged too
+    assert set(range(2201, 2249)) <= set(port(recorded, 1, 50).tagged_vlans)
+
+
+def test_the_vlan_list_has_names(recorded):
+    vlans = recorded[0][1].vlans
+    assert {"vlan_id": 21, "name": "fpgas"} in vlans
+    assert {"vlan_id": 2101, "name": "pi-sw1-p1"} in vlans
+
+
+def test_every_board_port_has_its_own_pvid(recorded):
+    for switch, count in ((1, 40), (2, 48)):
+        for number in range(1, count + 1):
+            assert port(recorded, switch, number).pvid == 2000 + 100 * switch + number
+
+
+def test_board_ports_are_also_untagged_in_vlan_21_issue_16(recorded):
+    """Pins today's real state, which is a fault: fpgas-online/fpgas.online-poe#16 (a board port is also an
+    untagged member of VLAN 21 besides its own per-port VLAN). Update this test when that issue is fixed.
+    Switch 2 ports 41 and 48 are the exceptions (VLAN 5 and VLAN 121 instead)."""
+    for switch, count in ((1, 40), (2, 48)):
+        for number in range(1, count + 1):
+            p = port(recorded, switch, number)
+            own = 2000 + 100 * switch + number
+            if (switch, number) in ((2, 41), (2, 48)):
+                assert 21 not in p.untagged_vlans
+            else:
+                assert p.untagged_vlans == [21, own], (switch, number)
+
+
+def test_a_long_hex_string_reads_the_same_wrapped_or_on_one_line():
+    wrapped = ".1.2.3.4 = Hex-STRING: 00 01 02 03 \n04 05 06 07 \n08 \n"
+    one = ".1.2.3.4 = Hex-STRING: 00 01 02 03 04 05 06 07 08\n"
+    assert parse_netsnmp_lines(wrapped) == parse_netsnmp_lines(one)
+    assert parse_netsnmp_lines(one)[0].value == bytes(range(9))
 
 
 def test_the_runner_only_ever_read(recorded):
