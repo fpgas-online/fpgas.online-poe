@@ -7,6 +7,7 @@ Requires the net-snmp CLI tools (apt: snmp), like the switch_setup tests.
 """
 
 import json
+import logging
 import os
 import textwrap
 import time
@@ -497,11 +498,39 @@ def test_a_malformed_request_is_a_clean_400(switch_2_untouchable, path, body):
     assert r.json()["error"]
 
 
-@pytest.mark.parametrize("path", ["/status", "/toggle"])
+@pytest.mark.parametrize("path", ["/status", "/toggle", "/power"])
 def test_a_body_that_is_not_json_is_a_clean_400(switch_2_untouchable, path):
-    r = Client().post(path, data="port=3&switch=2", content_type="application/x-www-form-urlencoded")
+    r = Client().post(path, data="port=3&switch=2", content_type="application/json")
     assert r.status_code == 400
     assert "expected a JSON body" in r.json()["error"]
+
+
+# --- cross-site requests: refused before anything is read (the coordinator, 2026-10-09) ---
+
+BODY = json.dumps({"switch": 2, "port": 3, "on": False})
+
+
+@pytest.mark.parametrize("path", ["/status", "/toggle", "/power"])
+@pytest.mark.parametrize("content_type", ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data"])
+def test_a_cross_site_form_or_text_post_is_refused(switch_2_untouchable, path, content_type):
+    """What a page on another site can send without a preflight: no JSON content type."""
+    r = Client().generic("POST", path, BODY, content_type=content_type, HTTP_SEC_FETCH_SITE="cross-site")
+    assert r.status_code == 403 and "nothing was sent to the switch" in r.json()["error"]
+
+
+@pytest.mark.parametrize("path", ["/status", "/toggle", "/power"])
+@pytest.mark.parametrize("site", ["cross-site", "same-site", "none"])
+def test_a_json_post_from_anywhere_but_our_own_pages_is_refused(switch_2_untouchable, path, site):
+    r = Client().post(path, BODY, content_type="application/json", HTTP_SEC_FETCH_SITE=site)
+    assert r.status_code == 403 and site in r.json()["error"]
+
+
+@pytest.mark.parametrize("site", [{"HTTP_SEC_FETCH_SITE": "same-origin"}, {}])
+def test_the_sites_own_fetch_and_a_tool_on_the_host_get_through(switch_2, site):
+    """Our pages' fetch (same-origin, JSON) and a direct call with no Sec-Fetch-Site reach the policy and the switch."""
+    r = Client().post("/power", BODY, content_type="application/json; charset=UTF-8", **site)
+    assert (r.status_code, r.json()) == (200, {"state": "off"})
+    assert switch_2.state.poe[3].admin is False
 
 
 @pytest.mark.parametrize("path", ["/status", "/toggle"])
@@ -515,3 +544,202 @@ def test_a_body_nested_too_deeply_to_read_is_a_clean_400(switch_2_untouchable, p
 @pytest.mark.parametrize("path", ["/status", "/toggle"])
 def test_only_post_is_answered(switch_2_untouchable, path):
     assert Client().get(path).status_code == 405
+
+
+# --- /power: switch one port on or off (the switch dashboard's PoE toggle) ------
+
+LOGGER = "snmp_switch.views"
+
+
+def power(body, **headers):
+    return Client().post("/power", data=json.dumps(body), content_type="application/json", **headers)
+
+
+def poe_lines(caplog):
+    return [r for r in caplog.records if r.name == LOGGER and r.getMessage().startswith("poe ")]
+
+
+def test_off_then_on_sets_the_port(switch_2, monkeypatch):
+    assert switch_2.state.poe[PORT].admin is True
+    r = power({"switch": 2, "port": PORT, "on": False})
+    assert (r.status_code, r.json()) == (200, {"state": "off"})
+    assert switch_2.state.poe[PORT].admin is False
+    caches["poe-rate-limit"].clear()
+    r = power({"switch": 2, "port": str(PORT), "on": True})
+    assert (r.status_code, r.json()) == (200, {"state": "on"})
+    assert switch_2.state.poe[PORT].admin is True
+
+
+def test_the_legacy_switch_is_set_too(legacy_switch):
+    r = power({"port": 9, "on": False})
+    assert (r.status_code, r.json()) == (200, {"state": "off"})
+    assert legacy_switch == [("set", "9", "2")]
+
+
+@pytest.mark.parametrize("on", [None, "true", 1, 0, "off", [], {}])
+def test_on_must_be_a_json_boolean(switch_2_untouchable, on):
+    r = power({"switch": 2, "port": PORT, "on": on})
+    assert r.status_code == 400 and "'on'" in r.json()["error"]
+
+
+def test_on_is_required(switch_2_untouchable):
+    assert power({"switch": 2, "port": PORT}).status_code == 400
+
+
+def test_a_bad_on_takes_no_ones_turn(legacy_switch):
+    assert power({"port": 9, "on": "yes"}).status_code == 400
+    assert power({"port": 9, "on": False}).status_code == 200
+
+
+def test_a_port_the_site_does_not_offer_is_refused_and_never_written(switch_2_untouchable):
+    policy.OFFERED.clear()
+    r = power({"switch": 2, "port": PORT, "on": False})
+    assert r.status_code == 403
+    assert (2, PORT) in policy.ASKED
+
+
+def test_an_unlisted_port_is_refused_and_never_written(switch_2_untouchable):
+    r = power({"switch": 2, "port": 4, "on": False})  # an access port, but not offered
+    assert r.status_code == 403
+
+
+def test_a_trunk_is_refused_even_if_offered(switch_2_untouchable):
+    policy.OFFERED.add((2, 51))
+    assert power({"switch": 2, "port": 51, "on": False}).status_code == 403
+
+
+def test_power_shares_the_limit_with_toggle(legacy_switch):
+    assert post("/toggle", {"port": "9"}).status_code == 200
+    r = power({"port": 9, "on": False})
+    assert r.status_code == 429 and int(r["Retry-After"]) >= 1
+    assert legacy_switch.count(("set", "9", "2")) == 1  # only toggle's own off
+
+
+def test_toggle_after_power_is_limited_too(legacy_switch):
+    assert power({"port": 9, "on": True}).status_code == 200
+    assert post("/toggle", {"port": "9"}).status_code == 429
+
+
+def test_a_failed_set_gives_the_turn_back(switch_2, monkeypatch):
+    def refuse(self, port, on):
+        raise NetgearSwitchError("timeout")
+    with monkeypatch.context() as m:
+        m.setattr(switches.SyncSwitch, "set_poe", refuse)
+        r = power({"switch": 2, "port": PORT, "on": False})
+    assert r.status_code == 502 and r.json()["error"].startswith("switch:")
+    # the claim was released: the retry is not told to wait
+    assert power({"switch": 2, "port": PORT, "on": False}).status_code == 200
+
+
+def test_without_a_working_rate_limit_it_is_refused(legacy_switch):
+    with override_settings(SNMP_SWITCH_RATE_LIMIT_CACHE=None):
+        assert power({"port": 9, "on": False}).status_code == 503
+    assert legacy_switch == []
+
+
+def test_the_board_page_is_told(legacy_switch, monkeypatch):
+    told = []
+    monkeypatch.setattr("snmp_switch.views.notify_dcws", lambda *a: told.append(a))
+    power({"port": 9, "on": False})
+    assert told == [(9, "set", "off")]
+
+
+@pytest.mark.parametrize("method", ["get", "put", "delete"])
+def test_power_answers_only_post(switch_2_untouchable, method):
+    assert getattr(Client(), method)("/power").status_code == 405
+
+
+def test_status_and_toggle_still_work_with_the_decorator_change(legacy_switch):
+    assert post("/status", {"port": "9"}).json() == {"state": "on"}
+    assert post("/toggle", {"port": "9"}).json() == {"9": ["off", "on"]}
+
+
+# --- the log line ------------------------------------------------------------
+
+
+def test_one_info_line_with_who_what_and_result(legacy_switch, caplog):
+    caplog.set_level(logging.INFO)
+    power({"port": 9, "on": False}, HTTP_USER_AGENT="curl/8.0", REMOTE_ADDR="203.0.113.7")
+    (line,) = poe_lines(caplog)
+    assert line.levelno == logging.INFO
+    assert line.getMessage() == "poe off switch=- port=9 from=203.0.113.7 ua=curl/8.0 result=off"
+
+
+def test_the_switch_index_and_on_are_logged(switch_2, caplog):
+    caplog.set_level(logging.INFO)
+    power({"switch": 2, "port": PORT, "on": False}, REMOTE_ADDR="198.51.100.2")
+    caches["poe-rate-limit"].clear()
+    power({"switch": 2, "port": PORT, "on": True}, REMOTE_ADDR="198.51.100.2")
+    assert [r.getMessage().split(" from=")[0] for r in poe_lines(caplog)] == [
+        f"poe off switch=2 port={PORT}", f"poe on switch=2 port={PORT}"]
+    assert poe_lines(caplog)[1].getMessage().endswith("result=on")
+
+
+def test_the_address_is_nginx_s_real_ip_not_a_forged_forwarded_for(legacy_switch, caplog):
+    """nginx appends the peer to a client-supplied X-Forwarded-For, so its first entry is the
+    client's own claim; X-Real-IP is the peer nginx saw."""
+    caplog.set_level(logging.INFO)
+    power({"port": 9, "on": False}, HTTP_X_FORWARDED_FOR="1.1.1.1, 203.0.113.9",
+          HTTP_X_REAL_IP="203.0.113.9", REMOTE_ADDR="unix")
+    (line,) = poe_lines(caplog)
+    assert " from=203.0.113.9 " in line.getMessage()
+    assert "1.1.1.1" not in line.getMessage()
+
+
+def test_the_remote_addr_is_the_fallback(legacy_switch, caplog):
+    caplog.set_level(logging.INFO)
+    power({"port": 9, "on": False})
+    assert " from=127.0.0.1 " in poe_lines(caplog)[0].getMessage()
+
+
+def test_the_user_agent_is_cut_to_200_and_loses_control_characters(legacy_switch, caplog):
+    caplog.set_level(logging.INFO)
+    power({"port": 9, "on": False}, HTTP_USER_AGENT="a\x00b\x1b[31mc\r\nINFO forged line" + "x" * 300)
+    (line,) = poe_lines(caplog)
+    message = line.getMessage()
+    assert "\n" not in message and "\r" not in message and "\x00" not in message and "\x1b" not in message
+    ua = message.split(" ua=")[1].rsplit(" result=", 1)[0]
+    assert len(ua) == 200 and ua.startswith("ab[31mcINFO forged line")
+
+
+def test_no_user_agent_is_a_dash(legacy_switch, caplog):
+    caplog.set_level(logging.INFO)
+    power({"port": 9, "on": False})
+    assert " ua=- " in poe_lines(caplog)[0].getMessage()
+
+
+def test_a_rate_limited_request_is_logged_as_such(legacy_switch, caplog):
+    power({"port": 9, "on": False})
+    caplog.set_level(logging.INFO)
+    power({"port": 9, "on": True})
+    (line,) = poe_lines(caplog)
+    assert " result=rate-limited " in line.getMessage()
+
+
+def test_a_failed_set_is_logged_without_the_error_text(switch_2, monkeypatch, caplog):
+    def refuse(self, port, on):
+        raise NetgearSwitchError("secret-looking detail")
+    monkeypatch.setattr(switches.SyncSwitch, "set_poe", refuse)
+    caplog.set_level(logging.INFO)
+    power({"switch": 2, "port": PORT, "on": False})
+    (line,) = poe_lines(caplog)
+    assert line.getMessage().endswith("result=error NetgearSwitchError")
+    assert "secret" not in line.getMessage()
+
+
+@pytest.mark.parametrize("body", [{"port": 9, "on": "no"}, {"port": 99, "on": False}])
+def test_a_request_that_never_got_to_a_write_is_not_logged_as_one(legacy_switch, caplog, body):
+    caplog.set_level(logging.INFO)
+    power(body)
+    assert poe_lines(caplog) == []
+
+
+def test_a_write_that_fails_unexpectedly_is_a_json_502_and_frees_the_port(switch_2_untouchable, monkeypatch):
+    class Broken:
+        def set(self, on):
+            raise OSError("socket gone")
+
+    monkeypatch.setattr("snmp_switch.views.open_port", lambda ref: Broken())
+    r = power({"switch": 2, "port": PORT, "on": False})
+    assert r.status_code == 502 and r.json()["error"] == "switch: the write failed (OSError); try again"
+    assert power({"switch": 2, "port": PORT, "on": False}).status_code == 502  # not 429: the claim was released
