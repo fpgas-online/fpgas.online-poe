@@ -7,6 +7,12 @@ is replaced by the real class with ``runner=`` set to a WalkRunner
 (tests/walk_runner.py), so everything above the process boundary (the client's
 argv and parsing, netgear_switch, the reader's joins) is the real code.
 
+The OIDs recorded are those the reader asks for: the system group, ifTable and ifXTable (ifType
+1.3.6.1.2.1.2.2.1.3 among them), entPhysical sensors, the PoE MIB, LLDP, the Q-BRIDGE MAC table and, for the VLANs, the
+dot1qVlanStaticName/Egress/Untagged columns (1.3.6.1.2.1.17.7.1.4.3.1.{1,2,4}), the dot1qVlanCurrentEgress/Untagged
+columns (1.3.6.1.2.1.17.7.1.4.2.1.{4,5}) and dot1qPvid (1.3.6.1.2.1.17.7.1.4.5.1.1). Net-snmp wraps a long Hex-STRING
+port bitmap onto continuation lines; the fixtures hold each on one line, which the client reads the same.
+
 The fixtures hold OID lines only: no community and no IPv4 address. Names are
 the ones the public dashboard may show (fleet Pis, the switches' own sysNames)
 or stand-ins: the gateway is "<role>.gateway" in its port labels and
@@ -135,10 +141,12 @@ def test_the_fixtures_hold_no_secret_or_address(path):
 # names. Each must be a name the public dashboard may show, the gateway's stand-in, or a stand-in for a private
 # device; the real names of private devices and of our hosts are not kept.
 NAME_BEARING = re.compile(r"^\.(1\.3\.6\.1\.2\.1\.31\.1\.1\.1\.18|1\.3\.6\.1\.2\.1\.1\.[4-6]\.0"
-                          r"|1\.0\.8802\.1\.1\.2\.1\.4\.1\.1\.9)\b")
+                          r"|1\.0\.8802\.1\.1\.2\.1\.4\.1\.1\.9|1\.3\.6\.1\.2\.1\.17\.7\.1\.4\.3\.1\.1)\b")
+# the house VLAN names, as they are (and switch 1 calls VLANs 2201-2248 transit-NNNN; they name networks, not machines), and the S3300 factory names Default and Auto-Video
+HOUSE_VLANS = "default|Default|Auto-Video|wifi|net|pwr|store|int|roam|fpgas|sm|sdr|iot|guest|t-fpgas|t-sm"
 SHOWN_NAME = re.compile(r"^(|eth-uplink\.pi\d+(\.fpgas)?|pi-sw\d+-p\d+|sw-netgear-[a-z0-9-]+"
                         r"|[0-9a-z/]+\.sw-netgear-[a-z0-9-]+|[a-z-]+\.gateway|gateway\.invalid"
-                        r"|eth0\.dev-device|dev-device|house-device)$")
+                        r"|eth0\.dev-device|dev-device|house-device|transit-\d+|" + HOUSE_VLANS + ")$")
 
 
 @pytest.mark.parametrize("path", WALKS, ids=lambda p: p.name)
