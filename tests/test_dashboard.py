@@ -429,14 +429,14 @@ def test_rates_come_from_the_previous_cached_read(head, cache, clock, reads):
 def test_a_caller_that_loses_the_lock_gets_the_last_read(head, cache, clock, reads):
     first = dashboard.cached_read_all(cache, ttl=15)[0]
     clock.advance(30)  # stale, so a read is due
-    assert cache.add("dashboard:v1:lock:1", 1, 30)  # another worker is reading
+    assert cache.add("dashboard:v2:lock:1", 1, 30)  # another worker is reading
     got = dashboard.cached_read_all(cache, ttl=15)[0]
     assert reads == [1]  # this caller did not read
     assert got == first
-    cache.delete("dashboard:v1:lock:1")
+    cache.delete("dashboard:v2:lock:1")
     dashboard.cached_read_all(cache, ttl=15)
     assert reads == [1, 1]
-    assert cache.add("dashboard:v1:lock:1", 1, 30)  # and its own lock was let go
+    assert cache.add("dashboard:v2:lock:1", 1, 30)  # and its own lock was let go
 
 
 def test_the_lock_is_let_go_when_a_read_fails(head, cache, clock, monkeypatch):
@@ -446,11 +446,11 @@ def test_the_lock_is_let_go_when_a_read_fails(head, cache, clock, monkeypatch):
     monkeypatch.setattr(dashboard, "_read_spec", broken)
     with pytest.raises(RuntimeError):
         dashboard.cached_read_all(cache, ttl=15)
-    assert cache.add("dashboard:v1:lock:1", 1, 30)
+    assert cache.add("dashboard:v2:lock:1", 1, 30)
 
 
 def test_losing_the_lock_with_nothing_cached_says_so(head, cache, clock, reads):
-    assert cache.add("dashboard:v1:lock:1", 1, 30)
+    assert cache.add("dashboard:v2:lock:1", 1, 30)
     (view,) = dashboard.cached_read_all(cache, ttl=15)
     assert reads == []
     assert not view.reachable and view.error == "first read in progress"
@@ -486,7 +486,7 @@ def test_a_dead_switch_never_seen_has_no_ports(monkeypatch, tmp_path, cache, clo
 
 
 def test_an_entry_this_code_cannot_read_is_a_miss(head, cache, clock, reads):
-    key = "dashboard:v1:switch:1"
+    key = "dashboard:v2:switch:1"
     cache.set(key, {"index": 1, "a_field_from_another_version": True, "ports": []}, 60)
     (view,) = dashboard.cached_read_all(cache, ttl=15)
     assert reads == [1] and view.reachable
@@ -503,12 +503,12 @@ def test_a_lock_a_later_reader_took_is_not_deleted(head, cache, clock, monkeypat
     real = dashboard._read_spec
 
     def slow(spec):  # our lock expired while we read, and another worker took its own
-        cache.set("dashboard:v1:lock:1", "someone else", 60)
+        cache.set("dashboard:v2:lock:1", "someone else", 60)
         return real(spec)
 
     monkeypatch.setattr(dashboard, "_read_spec", slow)
     dashboard.cached_read_all(cache, ttl=15)
-    assert cache.get("dashboard:v1:lock:1") == "someone else"
+    assert cache.get("dashboard:v2:lock:1") == "someone else"
 
 
 def test_switches_are_read_at_the_same_time(monkeypatch, tmp_path, cache, clock):

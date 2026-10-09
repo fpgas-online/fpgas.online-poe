@@ -6,6 +6,10 @@ without knowing SNMP. ``cached_read_all()`` is what a page calls: one read
 per switch per interval, whatever the number of viewers, with traffic worked
 out as a rate between two reads.
 
+The columns are: link, speed, the PoE state and watts, LLDP neighbour, MAC addresses, octet
+counters and their rates, errors, and the VLANs (the port VLAN ID, PVID, and the VLANs the port sends
+untagged and tagged; the switch-wide list of VLAN ids and names is on the view).
+
 Nothing here writes to a switch, and no SNMP community reaches a view, an
 error text or a log line: a view's error is one of a few fixed public texts,
 and the detail logged is scrubbed of the community. Text the switch itself
@@ -85,6 +89,12 @@ class PortView:
     tx_bps: float | None = None
     rx_errors: int | None = None
     tx_errors: int | None = None
+    # 802.1Q: the port VLAN ID (what untagged frames arriving on the port join), the VLANs the port sends
+    # untagged (it is an egress member of them) and the VLANs it sends tagged; each list is sorted, and all
+    # are None / empty when the switch could not give the VLAN tables
+    pvid: int | None = None
+    untagged_vlans: list[int] = field(default_factory=list)
+    tagged_vlans: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -98,6 +108,8 @@ class SwitchView:
     ports: list[PortView] = field(default_factory=list)
     # when the ports were last read successfully (== read_at while reachable)
     good_at: str | None = None
+    # every VLAN the switch has, {"vlan_id": int, "name": str | None}, by id; empty when not read
+    vlans: list[dict] = field(default_factory=list)
 
 
 def _now():
@@ -147,11 +159,25 @@ def _lldp_by_port(neighbors):
     return out
 
 
+def _vlans_by_port(vlans):
+    """({port: {vlan ids it sends untagged}}, {port: {vlan ids it sends tagged}}) from VLANInfo rows.
+
+    Only egress members count: the untagged bitmap of a real GSM7252PS also has bits for ports that are not
+    members of the VLAN (VLAN 6 lists ports 1-45), and those bits mean nothing."""
+    untagged, tagged = {}, {}
+    for vlan in vlans:
+        for port in vlan.untagged_ports & vlan.member_ports:
+            untagged.setdefault(port, set()).add(vlan.vlan_id)
+        for port in vlan.tagged_ports & vlan.member_ports:
+            tagged.setdefault(port, set()).add(vlan.vlan_id)
+    return untagged, tagged
+
+
 def _poe_watts(status):
     return None if status.power_mw is None else status.power_mw / 1000
 
 
-def _build_ports(ports, poe, stats, lldp, macs, port_count):
+def _build_ports(ports, poe, stats, lldp, macs, port_count, pvids=None, vlans=None):
     """One PortView per front-panel port, 1..port_count. ifTable also lists the CPU interface, the LAGs and the
     VLAN routing interfaces (ifIndex 400 and up on these models): they are not ports, and are left out."""
     poe = {p.port: p for p in poe or []}
@@ -160,6 +186,8 @@ def _build_ports(ports, poe, stats, lldp, macs, port_count):
     mac_lists = {}
     for m in macs or []:
         mac_lists.setdefault(m.port, set()).add(m.mac)
+    pvids = dict(pvids or [])
+    untagged, tagged = _vlans_by_port(vlans or [])
     views = []
     for p in sorted((p for p in ports if 1 <= p.port <= port_count), key=lambda p: p.port):
         v = PortView(port=p.port, label=p.description, link_up=p.link_up,
@@ -178,6 +206,9 @@ def _build_ports(ports, poe, stats, lldp, macs, port_count):
             v.lldp_chassis = n.remote_chassis_id
         if p.link_up:
             v.macs = sorted(mac_lists.get(p.port, ()))
+        v.pvid = pvids.get(p.port)
+        v.untagged_vlans = sorted(untagged.get(p.port, ()))
+        v.tagged_vlans = sorted(tagged.get(p.port, ()))
         views.append(v)
     return views
 
@@ -217,10 +248,14 @@ def _read_spec(spec):
     view.good_at = _now().isoformat()
     lldp = _read_or_none(sw.get_lldp, "LLDP", notes, spec, community)
     macs = _read_or_none(sw.get_macs, "MAC table", notes, spec, community)
+    pvids = _read_or_none(sw.get_pvids, "PVID", notes, spec, community)
+    vlans = _read_or_none(sw.get_vlans, "VLANs", notes, spec, community)
     try:
         if name:
             view.name = _scrub(name, community)
-        view.ports = _build_ports(ports, poe, stats, lldp, macs, get_model(spec.model).port_count)
+        view.ports = _build_ports(ports, poe, stats, lldp, macs, get_model(spec.model).port_count,
+                                  pvids, vlans)
+        view.vlans = [{"vlan_id": v.vlan_id, "name": v.name} for v in sorted(vlans or [], key=lambda v: v.vlan_id)]
     except Exception as exc:  # an odd answer must not take the other switches' views with it
         view.error = "ports not read"
         log.warning("switch %s (%s): ports not read: %s", spec.index, spec.mgmt_host, _detail(exc, community))
@@ -267,7 +302,8 @@ def read_all():
 
 def _from_dict(d):
     """A cached view, or None for an entry this code cannot read (written by
-    another version): it is treated as a miss and read afresh."""
+    another version): it is treated as a miss and read afresh. The VLAN fields
+    have defaults, so an entry written before they existed still reads."""
     try:
         return SwitchView(**{**d, "ports": [PortView(**p) for p in d["ports"]]})
     except (TypeError, KeyError, AttributeError):
@@ -299,12 +335,12 @@ def _stale(new, old):
         p.rx_bps = p.tx_bps = None
     return SwitchView(index=new.index, name=old.name, model=old.model, reachable=False,
                       error=f"not answering since {since}",
-                      read_at=new.read_at, ports=old.ports, good_at=old.good_at)
+                      read_at=new.read_at, ports=old.ports, good_at=old.good_at, vlans=old.vlans)
 
 
 def _cached_switch(cache, ttl, spec):
-    key = f"dashboard:v1:switch:{spec.index}"
-    lock = f"dashboard:v1:lock:{spec.index}"
+    key = f"dashboard:v2:switch:{spec.index}"
+    lock = f"dashboard:v2:lock:{spec.index}"
     entry = cache.get(key)
     old = _from_dict(entry) if entry else None
     if old is not None:
