@@ -29,7 +29,7 @@ def not_a_board(ref):
         {'error': f'{ref} is not a board this site offers; nothing was sent to the switch'}, status=403)
 
 
-def poe_view(fn):
+def poe_view(fn=None, *, with_request=False):
     """Decode the JSON body, work out the switch port it names, refuse a
     port that cannot be a board's (a trunk, an uplink, a port outside the
     switch's access ports), and ask the site whether that port is a board it
@@ -38,7 +38,14 @@ def poe_view(fn):
     an unconfigured service a 503, a switch that will not answer a 502.
 
     The site's policy is looked up first, so a project that has none refuses
-    every request, whatever it says."""
+    every request, whatever it says.
+
+    A view is called as ``fn(ref)``. One that also needs the request (its
+    client address and user agent) and the decoded body (more fields than the
+    port) is declared ``@poe_view(with_request=True)`` and called as
+    ``fn(ref, request, body)``; the views declared plain are unchanged."""
+    if fn is None:
+        return functools.partial(poe_view, with_request=with_request)
 
     @csrf_exempt
     @require_POST
@@ -53,7 +60,7 @@ def poe_view(fn):
             ref = requested_port(body)
             if not allowed(request, ref.switch, ref.port):
                 return not_a_board(ref)
-            return fn(ref)
+            return fn(ref, request, body) if with_request else fn(ref)
         except PoeNotABoardPort as e:
             return not_a_board(e.args[0])
         except PoeRequestError as e:
