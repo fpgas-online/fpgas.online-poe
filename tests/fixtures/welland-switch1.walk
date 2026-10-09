@@ -1522,7 +1522,7 @@
 .1.3.6.1.2.1.31.1.1.1.18.5 = ""
 .1.3.6.1.2.1.31.1.1.1.18.6 = STRING: "eth-uplink.pi6.fpgas"
 .1.3.6.1.2.1.31.1.1.1.18.7 = STRING: "eth-uplink.pi7.fpgas"
-.1.3.6.1.2.1.31.1.1.1.18.8 = STRING: "eth0.rpi5-sqrl"
+.1.3.6.1.2.1.31.1.1.1.18.8 = STRING: "eth0.dev-device"
 .1.3.6.1.2.1.31.1.1.1.18.9 = STRING: "eth-uplink.pi9.fpgas"
 .1.3.6.1.2.1.31.1.1.1.18.10 = STRING: "eth-uplink.pi10.fpgas"
 .1.3.6.1.2.1.31.1.1.1.18.11 = STRING: "eth-uplink.pi11.fpgas"

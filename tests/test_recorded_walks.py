@@ -128,6 +128,25 @@ def test_the_fixtures_hold_no_secret_or_address(path):
     assert all(re.fullmatch(r"\.[0-9.]+ = .*", line) for line in text.splitlines())
 
 
+# The strings in a walk that can name a machine: port labels (ifAlias), sysContact/sysName/sysLocation, LLDP system
+# names. Each must be a name the public dashboard may show, the gateway's stand-in, or a stand-in for a private
+# device; the real names of private devices and of our hosts are not kept.
+NAME_BEARING = re.compile(r"^\.(1\.3\.6\.1\.2\.1\.31\.1\.1\.1\.18|1\.3\.6\.1\.2\.1\.1\.[4-6]\.0"
+                          r"|1\.0\.8802\.1\.1\.2\.1\.4\.1\.1\.9)\b")
+SHOWN_NAME = re.compile(r"^(|eth-uplink\.pi\d+(\.fpgas)?|pi-sw\d+-p\d+|sw-netgear-[a-z0-9-]+"
+                        r"|[0-9a-z/]+\.sw-netgear-[a-z0-9-]+|[a-z-]+\.gateway|gateway\.invalid"
+                        r"|eth0\.dev-device|dev-device|house-device)$")
+
+
+@pytest.mark.parametrize("path", WALKS, ids=lambda p: p.name)
+def test_every_name_in_the_fixtures_is_one_the_public_page_may_show_or_a_stand_in(path):
+    for line in path.read_text().splitlines():
+        if NAME_BEARING.match(line):
+            value = line.split(" = ", 1)[1]
+            value = value[len("STRING: "):].strip('"') if value.startswith("STRING: ") else value.strip('"')
+            assert SHOWN_NAME.match(value), line
+
+
 def test_the_runner_answers_what_a_real_agent_answers():
     runner = WalkRunner(FIXTURES / "welland-switch1.walk")
     absent = runner(["snmpbulkwalk", "-r", "0", "host", ".1.3.6.1.99"])
