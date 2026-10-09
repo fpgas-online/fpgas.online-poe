@@ -166,9 +166,10 @@ STAND_IN = "02:00:5e:00:"  # the scrubbed MACs of every other machine
 
 
 def macs(path):
-    """Every MAC in a walk: LLDP chassis IDs and the Q-BRIDGE MAC table's OID suffixes."""
+    """Every MAC in a walk: LLDP chassis and port IDs and the Q-BRIDGE MAC table's OID suffixes."""
     for line in path.read_text().splitlines():
-        m = re.match(r"^\.1\.0\.8802\.1\.1\.2\.1\.4\.1\.1\.5\.[\d.]+ = Hex-STRING: ([0-9A-F ]+)$", line)
+        # LLDP chassis IDs (.5) and port IDs (.7) of the MAC subtype
+        m = re.match(r"^\.1\.0\.8802\.1\.1\.2\.1\.4\.1\.1\.[57]\.[\d.]+ = Hex-STRING: ([0-9A-F ]+)$", line)
         if m and len(m.group(1).split()) == 6:
             yield ":".join(m.group(1).lower().split())
         m = re.match(r"^\.1\.3\.6\.1\.2\.1\.17\.7\.1\.2\.2\.1\.2\.\d+\.((?:\d+\.){5}\d+) = ", line)
