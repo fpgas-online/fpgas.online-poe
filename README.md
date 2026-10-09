@@ -63,7 +63,7 @@ These are set by the [fpgas.online-infra](https://github.com/fpgas-online/fpgas.
 
 ### Which requests the Django views act on
 
-`/snmp/status` and `/snmp/toggle` take a JSON body `{"port": ..., "switch": ...}` by
+`/snmp/status`, `/snmp/toggle` and `/snmp/power` take a JSON body `{"port": ..., "switch": ...}` by
 POST and need no login, so the Django project that routes them must say which ports
 they may touch. Until it does, every request is refused (503): the package is never
 an open endpoint by default.
@@ -86,6 +86,8 @@ What a request gets:
 | 503 | No policy, no rate-limit store (or it is not answering), or no switch configured. |
 
 Every error is JSON `{"error": "<reason>"}`.
+
+`/snmp/power` takes `{"port": ..., "switch": ..., "on": true|false}` (`on` must be a JSON boolean, else 400) and sets that port on or off, with no cycle. It answers `{"state": "on"|"off"}`. It is guarded and rate limited exactly like `toggle` and shares its per-port limit (a `toggle` and a `power` of one port count against each other). Every request that reaches the switch, or is turned away by the limit, logs one INFO line through `snmp_switch.views`: `poe <on|off> switch=S port=P from=<client address> ua=<user agent> result=<state, error ... or rate-limited Ns>`. The client address is nginx's `X-Real-IP` (the peer it saw), else `REMOTE_ADDR`; the user agent is cut to 200 characters with control characters removed.
 
 The access-port bound needs the switches file, so it exists on the per-port-VLAN scheme only. The legacy single switch has no description of its ports: there the policy alone decides. The switches file has no notion of a service port: one inside the access range is treated like any other access port (accepted only if the policy offers it).
 
