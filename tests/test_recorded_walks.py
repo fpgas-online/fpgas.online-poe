@@ -13,7 +13,7 @@ or stand-ins: the gateway is "<role>.gateway" in its port labels and
 gateway.invalid as an LLDP name, two private devices are "dev-device" and
 "house-device". Two recorded strings were dropped: the management address inside
 switch 1's sysDescr and a firmware version string on switch 2 that reads like an
-address. Real Pi MAC addresses are kept; the public page shows them too.
+address. MAC addresses: the Pis' are real; every other machine's is a 02:00:5e:00 stand-in.
 """
 
 import re
