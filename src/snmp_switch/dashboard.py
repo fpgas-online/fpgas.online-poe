@@ -7,13 +7,15 @@ per switch per interval, whatever the number of viewers, with traffic worked
 out as a rate between two reads.
 
 The columns are: link, speed, the PoE state and watts, LLDP neighbour, MAC addresses, octet
-counters and their rates, errors, and the VLANs (the port VLAN ID, PVID, and the VLANs the port sends
-untagged and tagged; the switch-wide list of VLAN ids and names is on the view).
+counters and their rates, errors, and the VLANs: the port's PVID and the VLANs it sends untagged and
+tagged, with the switch-wide list of VLAN ids and names on the view. The VLAN membership is the switch's
+configured (static) Q-BRIDGE table, as netgear_switch reads it, not the live (current) one; on welland the two
+agree for every board port.
 
 Nothing here writes to a switch, and no SNMP community reaches a view, an
 error text or a log line: a view's error is one of a few fixed public texts,
 and the detail logged is scrubbed of the community. Text the switch itself
-reports (port labels, LLDP names, the sysName) is shown as the switch gives it.
+reports (port labels, LLDP names, the sysName, VLAN names) is shown as the switch gives it.
 
 Two deployment shapes exist (see :mod:`snmp_switch.switches`). The
 per-port-VLAN switches (welland) are read through ``netgear_switch``. The
