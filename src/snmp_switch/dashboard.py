@@ -82,6 +82,9 @@ class PortView:
     poe_watts: float | None = None
     lldp_name: str | None = None
     lldp_port: str | None = None
+    # lldpRemPortDesc, the neighbour's own description of its port: a Pi's lldpd sends its MAC as the port id
+    # (lldp_port) and its interface name here, so a page can show the name where the id is only the MAC
+    lldp_port_desc: str | None = None
     lldp_chassis: str | None = None
     macs: list[str] = field(default_factory=list)
     # the raw octet counters, so a caller can work out rates between two reads
@@ -205,6 +208,7 @@ def _build_ports(ports, poe, stats, lldp, macs, port_count, pvids=None, vlans=No
             n = lldp[p.port]
             v.lldp_name = n.remote_sys_name
             v.lldp_port = n.remote_port_id or n.remote_port_desc
+            v.lldp_port_desc = n.remote_port_desc
             v.lldp_chassis = n.remote_chassis_id
         if p.link_up:
             v.macs = sorted(mac_lists.get(p.port, ()))
