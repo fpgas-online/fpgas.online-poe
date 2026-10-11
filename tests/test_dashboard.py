@@ -637,3 +637,18 @@ def _build_fails_once_then_read(monkeypatch):
     assert [(v.reachable, v.error) for v in views][0] == (False, "ports not read")
     assert views[1].reachable and len(views[1].ports) == 52
     assert COMMUNITY not in repr(views)
+
+
+def test_the_neighbours_port_description_is_kept_beside_its_port_id():
+    """A Pi's lldpd sends its MAC as the port id and its interface name as the description: both reach the view,
+    so the site can show the name where the id says nothing the MACs do not (fpgas.online-site #89)."""
+    from netgear_switch.models import LLDPNeighbor, PortStatus
+
+    ifs = [PortStatus(port=n, name=f"1/0/{n}", admin_enabled=True, link_up=True, speed_mbps=1000) for n in (1, 2)]
+    lldp = [LLDPNeighbor(local_port=1, remote_sys_name="pi-sw1-p1", remote_port_desc="eth0",
+                         remote_chassis_id="02:00:5e:00:00:01", remote_port_id="02:00:5e:00:00:01"),
+            LLDPNeighbor(local_port=2, remote_sys_name="sw-a", remote_port_desc=None,
+                         remote_chassis_id="02:00:5e:00:00:02", remote_port_id="1/0/50")]
+    one, two = dashboard._build_ports(ifs, None, None, lldp, None, port_count=52)
+    assert (one.lldp_port, one.lldp_port_desc) == ("02:00:5e:00:00:01", "eth0")
+    assert (two.lldp_port, two.lldp_port_desc) == ("1/0/50", None)
