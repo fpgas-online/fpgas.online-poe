@@ -10,6 +10,8 @@ def pytest_configure():
     settings.configure(
         SECRET_KEY="not-a-secret",
         ROOT_URLCONF="snmp_switch.urls",
+        # the app, so its management command (switch_poller) is found as the site finds it
+        INSTALLED_APPS=["snmp_switch"],
         ALLOWED_HOSTS=["testserver"],
         # notify_dcws() group_sends the PoE state to the board page; an
         # in-memory layer accepts it without a running consumer
