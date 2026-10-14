@@ -124,11 +124,28 @@ def test_a_link_coming_up_is_reported_and_nothing_is_released():
     assert s.released == []
 
 
-def test_a_flap_between_two_polls_is_a_bounce_and_releases():
+def test_a_flap_between_two_polls_is_a_bounce_and_releases_the_lease_from_before_it():
     s = Script()
     s.poll(rows(SPEC, 100, {}, {3: 50}))
+    before = s.now
+    s.leases = [Lease("10.21.2.3", int(before) - 60 + LEASE_SECONDS)]  # granted a minute before the last reading
     assert s.poll(rows(SPEC, 300, {}, {3: 260})) == [(2, 3, "bounced")]
     assert s.released == [(2, 3, "link-down")]
+
+
+def test_a_bounce_keeps_the_lease_the_board_took_after_it():
+    s = Script()
+    s.poll(rows(SPEC, 100, {}, {3: 50}))
+    s.leases = [Lease("10.21.2.3", int(s.now) + 1 + LEASE_SECONDS)]  # granted after the last reading: the new boot's
+    assert s.poll(rows(SPEC, 300, {}, {3: 260})) == [(2, 3, "bounced")]
+    assert s.released == []
+
+
+def test_up_then_no_reading_then_up_with_a_new_last_change_is_a_bounce():
+    s = Script()
+    s.poll(rows(SPEC, 100, {}, {3: 50}))
+    assert s.poll(rows(SPEC, 300, {3: 5}, {3: 260})) == []
+    assert s.poll(rows(SPEC, 500, {}, {3: 400})) == [(2, 3, "bounced")]
 
 
 def test_ports_that_stay_up_cause_nothing():

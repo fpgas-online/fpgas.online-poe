@@ -3,7 +3,14 @@
 import pytest
 
 from snmp_switch import gateway
-from snmp_switch.gateway import GatewayFileError, parse_leases, parse_ports_conf, port_of_vlan, read_with_retry
+from snmp_switch.gateway import (
+    GatewayFileError,
+    parse_leases,
+    parse_ports_conf,
+    port_of_vlan,
+    read_leases,
+    read_with_retry,
+)
 from snmp_switch.poller import Lease
 
 # the shape fpgas.online-infra's ports.conf.j2 renders (two ports, then the quarantine range on the trunk)
@@ -96,3 +103,18 @@ def test_a_ports_conf_that_never_reads_whole_is_an_error(tmp_path, monkeypatch):
     path.write_text("interface=v2101\n")
     with pytest.raises(GatewayFileError):
         read_with_retry(path, parse_ports_conf)
+
+
+def test_the_lease_file_counts_only_when_two_reads_agree(tmp_path):
+    path = tmp_path / "leases"
+    texts = iter(["", LEASES, LEASES])  # caught empty mid-rewrite, then whole twice
+    path.write_text("1791941144 b8:27:eb")
+    assert len(read_leases(path, sleep=lambda s: path.write_text(next(texts)))) == 3
+
+
+def test_a_lease_file_that_never_reads_the_same_twice_is_an_error(tmp_path):
+    path = tmp_path / "leases"
+    count = iter(range(100))
+    path.write_text(LEASES)
+    with pytest.raises(GatewayFileError):
+        read_leases(path, sleep=lambda s: path.write_text(LEASES * (next(count) + 2)))

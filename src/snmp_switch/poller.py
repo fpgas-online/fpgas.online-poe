@@ -149,7 +149,9 @@ class Poller:
     keepalive: object = lambda: None
     clock: object = time.time
     last: dict = field(default_factory=dict)
+    read_at: dict = field(default_factory=dict)
     known: dict = field(default_factory=dict)
+    known_change: dict = field(default_factory=dict)
     watch: dict = field(default_factory=dict)
     silent: set = field(default_factory=set)
     polls: int = 0
@@ -162,19 +164,23 @@ class Poller:
         now = self.clock()
         at = datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds")
         seen = []
-        down = []
+        check = []  # (spec, port, since, cause): release when the port holds a lease granted before `since`
         for spec in self.specs:
             current = self._read(spec)
             if current is None:
                 continue
             found = self._changes(spec, self.last.get(spec.index), current, at)
-            self.last[spec.index] = current
+            previous_read_at = self.read_at.get(spec.index)
+            self.last[spec.index], self.read_at[spec.index] = current, now
             for change in found:
                 self.totals["changes"] += 1
                 seen.append(change)
                 self.publish(change.record())
-                if change.link in ("down", "bounced"):
+                if change.link == "down":
                     self._release(spec, change.port, "link-down")
+                elif change.link == "bounced":
+                    # the flap was after the last reading: a lease granted since is the board's new one, kept
+                    check.append((spec, change.port, previous_read_at, "link-down"))
             for p in board_ports(spec):
                 w = self.watch.setdefault((spec.index, p), PortWatch())
                 if link(current.oper[p]) == "down":
@@ -182,11 +188,11 @@ class Poller:
                         w.down_since = now
                     w.down_polls += 1
                     if w.down_polls >= DOWN_POLLS_BEFORE_RECONCILE:
-                        down.append((spec, p))
+                        check.append((spec, p, w.down_since, "down-port"))
                 else:
                     w.down_polls, w.down_since = 0, None
-        if down:
-            self._reconcile(down, now)
+        if check:
+            self._reconcile(check, now)
         return seen
 
     def _changes(self, spec, previous, current, at):
@@ -199,13 +205,15 @@ class Poller:
             now = link(current.oper[p])
             if now is None:
                 continue
-            before = self.known.get((spec.index, p))
-            self.known[(spec.index, p)] = now
+            key = (spec.index, p)
+            before, before_change = self.known.get(key), self.known_change.get(key)
+            self.known[key], self.known_change[key] = now, current.last_change[p]
             if previous is None or rebooted or before is None:
                 continue
             if before != now:
                 out.append(Change(spec.index, p, hostname(spec.index, p), now, at))
-            elif link(previous.oper[p]) == now and current.last_change[p] != previous.last_change[p]:
+            elif current.last_change[p] != before_change:
+                # the same state as the last known reading, but the port changed since: it flapped
                 out.append(Change(spec.index, p, hostname(spec.index, p), "bounced", at))
         return out
 
@@ -224,7 +232,7 @@ class Poller:
             log.info("switch %s: answering again", spec.index)
         return current
 
-    def _reconcile(self, down, now):
+    def _reconcile(self, check, now):
         try:
             leases = self.leases()
             addresses, lease_seconds = self.port_table()
@@ -240,11 +248,10 @@ class Poller:
         by_address = {}
         for lease in leases:
             by_address.setdefault(lease.address, []).append(lease)
-        for spec, p in down:
-            w = self.watch[(spec.index, p)]
+        for spec, p, since, cause in check:
             held = [lease for a in addresses.get((spec.index, p), ()) for lease in by_address.get(a, ())]
-            if any(self._stale(lease, w.down_since, now, lease_seconds) for lease in held):
-                self._release(spec, p, "down-port")
+            if any(self._stale(lease, since, now, lease_seconds) for lease in held):
+                self._release(spec, p, cause)
 
     @staticmethod
     def _stale(lease, down_since, now, lease_seconds):

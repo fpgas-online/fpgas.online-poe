@@ -86,9 +86,18 @@ def parse_leases(text):
     return leases
 
 
-def read_leases(path=LEASE_FILE):
-    with open(path, encoding="utf-8", errors="replace") as f:
-        return parse_leases(f.read())
+def read_leases(path=LEASE_FILE, sleep=time.sleep):
+    """parse_leases of a read that two consecutive reads agree on (dnsmasq truncates the file and writes it again),
+    or GatewayFileError after READ_TRIES reads."""
+    previous = None
+    for _ in range(READ_TRIES * 2):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        if text == previous:
+            return parse_leases(text)
+        previous = text
+        sleep(READ_PAUSE)
+    raise GatewayFileError(f"{path} did not read the same twice")
 
 
 def read_with_retry(path, parse, tries=READ_TRIES, pause=READ_PAUSE):
