@@ -91,6 +91,44 @@ Every error is JSON `{"error": "<reason>"}`.
 
 The access-port bound needs the switches file, so it exists on the per-port-VLAN scheme only. The legacy single switch has no description of its ports: there the policy alone decides. The switches file has no notion of a service port: one inside the access range is treated like any other access port (accepted only if the policy offers it).
 
+### What the board page is told, and the port's lease
+
+`toggle` and `power` send one line, `snmp: set power <state>`, to the status log of the board's page: channel
+group `pistat_<the Pi's hostname>` (`pistat_pi-sw2-p46`) on the per-port-VLAN switches, `pistat_pi<port>` on the
+legacy single switch. `status` sends nothing; the page shows its own answer.
+
+On the per-port-VLAN switches, a board that loses power loses its DHCP lease: after a `toggle` (once "on" is
+confirmed) and after a `power` to off, the view starts the gateway's `fpgas-release-port-lease` (installed by
+fpgas.online-infra's `pxe` role) for the port, through sudo, in the background. Off unless the site sets
+`SNMP_SWITCH_LEASE_RELEASE = True` (`snmp_switch/release.py`).
+
+## The switch poller
+
+`manage.py switch_poller` (the site's Django project; a systemd service on the gateway) watches every board port
+of the per-port-VLAN switches (`snmp_switch/poller.py`):
+
+- Every `SWITCH_POLL_SECONDS` (default 2) it reads, per switch, `sysUpTime` plus each board port's `ifOperStatus`
+  and `ifLastChange` in one SNMP GET. A port is down only when its `ifOperStatus` is 2 on a read where every
+  port answered; a switch that does not answer whole leaves its ports as they were.
+- A port's link change (`up`, `down`, or `bounced`: the same state on both reads but a new `ifLastChange`) is
+  published as JSON `{"schema": 1, "switch", "port", "hostname", "link", "at"}` on MQTT topic
+  `fpgas/<SWITCH_POLLER_SITE>/gw/port` (the broker in `FLEET_MQTT`). The site turns it into the board page's
+  status line, the switch dashboard's update and the registry's record.
+- A port that goes down or bounces has its leases released at once. On every poll, a port read down twice in a row
+  that still holds a lease granted before it went down has that lease released. Each release is one line in the
+  gateway's journal (`fpgas-lease-release`); a failing port is tried again after 1, 2, 4 ... polls.
+- It reads the gateway's `/etc/dnsmasq.d/ports.conf` (each port's addresses and lease time) and dnsmasq's lease
+  file, strictly (`snmp_switch/gateway.py`).
+- It runs `Type=notify` with a watchdog: one `WATCHDOG=1` per complete poll, and a summary line in the journal
+  every 300 polls.
+
+| Django setting | Purpose |
+|----------------|---------|
+| `SWITCH_POLLER_SITE` | The site's name in the MQTT topic (`welland`). Required. |
+| `FLEET_MQTT` | `{"host": ..., "port": ...}`: the broker. Required. |
+| `SWITCH_POLL_SECONDS` | The poll period. Optional, default 2. |
+| `SNMP_SWITCH_LEASE_RELEASE` | Whether releases run. Optional, default off. |
+
 ## Directory Structure
 
 ```
