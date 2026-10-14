@@ -6,6 +6,7 @@ per-switch SNMP write community in the environment.
 Requires the net-snmp CLI tools (apt: snmp), like the switch_setup tests.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -14,12 +15,15 @@ import time
 import types
 
 import pytest
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
 from django.core.cache import caches
 from django.test import Client, override_settings
 from netgear_switch.errors import NetgearSwitchError
 from netgear_switch.virtual.server import VirtualSwitch
 
-from snmp_switch import switches
+from snmp_switch import switches, views
+from snmp_switch.switches import PortRef
 from switch_setup.plan import SwitchSpec
 from tests import policy
 
@@ -641,7 +645,7 @@ def test_the_board_page_is_told(legacy_switch, monkeypatch):
     told = []
     monkeypatch.setattr("snmp_switch.views.notify_dcws", lambda *a: told.append(a))
     power({"port": 9, "on": False})
-    assert told == [(9, "set", "off")]
+    assert [(ref.switch, ref.port, gs, state) for ref, gs, state in told] == [(None, 9, "set", "off")]
 
 
 @pytest.mark.parametrize("method", ["get", "put", "delete"])
@@ -743,3 +747,76 @@ def test_a_write_that_fails_unexpectedly_is_a_json_502_and_frees_the_port(switch
     r = power({"switch": 2, "port": PORT, "on": False})
     assert r.status_code == 502 and r.json()["error"] == "switch: the write failed (OSError); try again"
     assert power({"switch": 2, "port": PORT, "on": False}).status_code == 502  # not 429: the claim was released
+
+
+# --- the board page, and the lease when the board loses power ------------------
+
+
+def test_the_board_group_is_the_pis_hostname_switch_included():
+    assert views.board_group(PortRef(2, 46)) == "pistat_pi-sw2-p46"
+    assert views.board_group(PortRef(1, 46)) == "pistat_pi-sw1-p46"
+
+
+def test_on_the_legacy_single_switch_the_group_is_the_port_alone():
+    assert views.board_group(PortRef(None, 9)) == "pistat_pi9"
+
+
+def received(group, action):
+    """The messages a consumer joined to `group` receives while `action` runs (each read waits at most 0.2 s)."""
+    layer = get_channel_layer()
+    channel = async_to_sync(layer.new_channel)()
+    async_to_sync(layer.group_add)(group, channel)
+    action()
+
+    async def drain():
+        out = []
+        while True:
+            try:
+                out.append(await asyncio.wait_for(layer.receive(channel), timeout=0.2))
+            except asyncio.TimeoutError:
+                return out
+
+    try:
+        return [m["message"] for m in async_to_sync(drain)()]
+    finally:
+        async_to_sync(layer.group_discard)(group, channel)
+
+
+@pytest.fixture()
+def no_release(monkeypatch):
+    started = []
+    monkeypatch.setattr(views, "start_release", lambda *a: started.append(a))
+    return started
+
+
+def test_a_reset_reaches_the_board_page_that_listens_for_it(switch_2, no_release, monkeypatch):
+    monkeypatch.setattr(views.time, "sleep", lambda seconds: None)
+    messages = received(f"pistat_pi-sw2-p{PORT}", lambda: post("/toggle", {"switch": 2, "port": PORT}))
+    assert messages == ["snmp: set power off", "snmp: set power on"]
+
+
+def test_a_reset_is_not_heard_on_the_other_switchs_port(switch_2, no_release, monkeypatch):
+    monkeypatch.setattr(views.time, "sleep", lambda seconds: None)
+    assert received(f"pistat_pi-sw1-p{PORT}", lambda: post("/toggle", {"switch": 2, "port": PORT})) == []
+
+
+def test_checking_the_state_tells_no_one(switch_2, no_release):
+    assert received(f"pistat_pi-sw2-p{PORT}", lambda: post("/status", {"switch": 2, "port": PORT})) == []
+
+
+def test_a_reset_releases_the_ports_lease(switch_2, no_release, monkeypatch):
+    monkeypatch.setattr(views.time, "sleep", lambda seconds: None)
+    assert post("/toggle", {"switch": 2, "port": PORT}).status_code == 200
+    assert no_release == [(2, PORT, "power-cycle")]
+
+
+def test_switching_off_releases_and_switching_on_does_not(switch_2, no_release):
+    assert post("/power", {"switch": 2, "port": PORT, "on": False}).json() == {"state": "off"}
+    assert no_release == [(2, PORT, "power-off")]
+    assert post("/power", {"switch": 2, "port": PORT, "on": True}).status_code in (200, 429)
+    assert no_release == [(2, PORT, "power-off")]
+
+
+def test_the_legacy_switch_has_no_lease_to_release(legacy_switch, no_release):
+    assert post("/toggle", {"port": "9"}).status_code == 200
+    assert no_release == []
