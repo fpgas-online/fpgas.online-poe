@@ -20,8 +20,10 @@ log = logging.getLogger(__name__)
 SUDO = "/usr/bin/sudo"
 SCRIPT = "/usr/local/sbin/fpgas-release-port-lease"
 CAUSES = ("link-down", "power-cycle", "power-off", "down-port")
-# dhcp_release6 alone can take 5 s; the script also waits for the lease file to show the release
-TIMEOUT = 30
+# The script's own worst case: a 30 s wait for another release's lock, then 10 s per tool and 8 s for the lease file.
+# The poller's systemd watchdog (WatchdogSec=120, fpgas.online-infra) must stay above this; it is kept alive before
+# each release.
+TIMEOUT = 60
 
 
 def enabled():

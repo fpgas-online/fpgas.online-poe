@@ -167,6 +167,11 @@ def toggle(ref):
         if on_error is None:
             break
 
+    if off_error is None and off == "off":
+        # the switch confirmed the port off, so the board lost power (whether or not "on" is confirmed below): its
+        # lease goes, and it takes the address afresh as it boots
+        release_lease(ref, "power-cycle")
+
     if on_error is not None:
         # no power cycle to protect, and someone has to be able to switch
         # the port back on: the next Reset must not be told to wait
@@ -177,9 +182,6 @@ def toggle(ref):
                       f'tried again at once'},
             status=502)
     notify_dcws(ref, "set", on)
-    if off_error is None:
-        # the board lost power: its lease goes, and it takes the address afresh as it boots
-        release_lease(ref, "power-cycle")
     if off_error is not None:
         release_toggle_claim(ref)
         return JsonResponse(

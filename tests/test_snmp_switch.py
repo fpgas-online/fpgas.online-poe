@@ -813,8 +813,55 @@ def test_a_reset_releases_the_ports_lease(switch_2, no_release, monkeypatch):
 def test_switching_off_releases_and_switching_on_does_not(switch_2, no_release):
     assert post("/power", {"switch": 2, "port": PORT, "on": False}).json() == {"state": "off"}
     assert no_release == [(2, PORT, "power-off")]
-    assert post("/power", {"switch": 2, "port": PORT, "on": True}).status_code in (200, 429)
+    caches["poe-rate-limit"].clear()  # the off took this port's turn
+    assert post("/power", {"switch": 2, "port": PORT, "on": True}).json() == {"state": "on"}
     assert no_release == [(2, PORT, "power-off")]
+
+
+class ScriptedPort:
+    """A switch port whose set() answers are scripted: a state, or an exception to raise."""
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+
+    def set(self, on):
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+@pytest.fixture()
+def scripted(switch_2_untouchable, monkeypatch, no_release):
+    monkeypatch.setattr(views.time, "sleep", lambda seconds: None)
+
+    def use(*answers):
+        monkeypatch.setattr(views, "open_port", lambda ref: ScriptedPort(answers))
+    return use
+
+
+def test_a_reset_whose_off_the_switch_did_not_take_releases_nothing(scripted, no_release):
+    scripted("on", "on")  # the switch answers "on" to the off
+    assert post("/toggle", {"switch": 2, "port": PORT}).status_code == 200
+    assert no_release == []
+
+
+def test_a_reset_whose_on_failed_still_releases_the_board_lost_power(scripted, no_release):
+    scripted("off", *[TimeoutError("no answer")] * views.ON_ATTEMPTS)
+    assert post("/toggle", {"switch": 2, "port": PORT}).status_code == 502
+    assert no_release == [(2, PORT, "power-cycle")]
+
+
+def test_a_reset_whose_off_failed_releases_nothing(scripted, no_release):
+    scripted(TimeoutError("no answer"), "on")
+    assert post("/toggle", {"switch": 2, "port": PORT}).status_code == 502
+    assert no_release == []
+
+
+def test_an_off_the_switch_answers_on_releases_nothing(scripted, no_release):
+    scripted("on")
+    assert post("/power", {"switch": 2, "port": PORT, "on": False}).json() == {"state": "on"}
+    assert no_release == []
 
 
 def test_the_legacy_switch_has_no_lease_to_release(legacy_switch, no_release):
