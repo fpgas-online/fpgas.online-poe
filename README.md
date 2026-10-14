@@ -117,10 +117,14 @@ of the per-port-VLAN switches (`snmp_switch/poller.py`):
 - A port that goes down or bounces has its leases released at once. On every poll, a port read down twice in a row
   that still holds a lease granted before it went down has that lease released. Each release is one line in the
   gateway's journal (`fpgas-lease-release`); a failing port is tried again after 1, 2, 4 ... polls.
-- It reads the gateway's `/etc/dnsmasq.d/ports.conf` (each port's addresses and lease time) and dnsmasq's lease
-  file, strictly (`snmp_switch/gateway.py`).
-- It runs `Type=notify` with a watchdog: one `WATCHDOG=1` per complete poll, and a summary line in the journal
-  every 300 polls.
+- For each check it reads the gateway's `/etc/dnsmasq.d/ports.conf` (each port's addresses and lease time; strictly)
+  and dnsmasq's lease file (only each lease's address and expiry) (`snmp_switch/gateway.py`). A lease that runs
+  longer than the current lease time was granted under an earlier one, so it counts as granted before the port
+  went down.
+- It runs `Type=notify` with a watchdog: one `WATCHDOG=1` per complete poll and before each release, and a
+  summary line in the journal every 300 polls. It connects to the broker in the background and keeps reconnecting.
+- A change is a port's reading differing from its last known one: a reading that is neither up nor down leaves the
+  known state. After a switch reboot, or when the poller starts, the first reading is a baseline and reports nothing.
 
 | Django setting | Purpose |
 |----------------|---------|
