@@ -70,36 +70,29 @@ def test_an_empty_lease_file_has_no_leases():
     assert parse_leases("") == []
 
 
-@pytest.mark.parametrize("line", [
-    "1791941144 b8:27:eb:e3:e7:e4 10.21.2.48 pi-sw2-p48",  # a field short (caught mid-write)
-    "1791941144 b8:27:eb:e3:e7 10.21.2.48 pi-sw2-p48 *",  # a cut MAC
-    "1791941144 b8:27:eb:e3:e7:e4 10.21.2.4 8 pi-sw2-p48 *",
-    "17919411x4 b8:27:eb:e3:e7:e4 10.21.2.48 pi-sw2-p48 *",
-    "1791941144 b8:27:eb:e3:e7:e4 not-an-address pi-sw2-p48 *",
-    "1791941144 b8:27:eb:e3:e7:e4 10.21.2.48 $(reboot) *",
-    "1791959703 ab 2404:e80:a137:2102::30 host 00:04",  # IAID not a number
-    "duid",
-])
-def test_any_line_not_in_dnsmasqs_shape_refuses_the_whole_file(line):
-    with pytest.raises(GatewayFileError):
-        parse_leases(LEASES + line + "\n")
+def test_lines_that_are_not_leases_are_passed_over():
+    text = LEASES + "1791941144 b8:27:eb\n" + "garbage\n" + "1791941144 b8:27:eb:e3:e7:e4 not-an-address x *\n"
+    assert parse_leases(text) == parse_leases(LEASES)
 
 
-def test_a_file_caught_mid_rewrite_is_read_again(tmp_path, monkeypatch):
+def test_real_dnsmasq_lines_with_an_underscore_name_or_a_temporary_v6_lease_are_read():
+    # dnsmasq allows "_" in host names (util.c legal_hostname) and writes T<iaid> for a temporary address (lease.c)
+    text = ("1791941144 b8:27:eb:e3:e7:e4 10.21.0.130 my_laptop 01:b8:27:eb:e3:e7:e4\n"
+            "1791959703 T318764444 2404:e80:a137:2102::99 my_laptop 00:04:a1\n")
+    assert parse_leases(text) == [Lease("10.21.0.130", 1791941144), Lease("2404:e80:a137:2102::99", 1791959703)]
+
+
+def test_a_ports_conf_caught_mid_rewrite_is_read_again(tmp_path, monkeypatch):
     monkeypatch.setattr(gateway.time, "sleep", lambda seconds: None)
-    path = tmp_path / "leases"
-    reads = iter(["1791941144 b8:27:eb", LEASES])
-
-    def parse(text):
-        return parse_leases(next(reads))
-
+    reads = iter(["interface=v2101\n", PORTS_CONF])
+    path = tmp_path / "ports.conf"
     path.write_text("x")
-    assert len(read_with_retry(path, parse)) == 3
+    assert read_with_retry(path, lambda text: parse_ports_conf(next(reads)))[1] == 300
 
 
-def test_a_file_that_never_reads_whole_is_an_error(tmp_path, monkeypatch):
+def test_a_ports_conf_that_never_reads_whole_is_an_error(tmp_path, monkeypatch):
     monkeypatch.setattr(gateway.time, "sleep", lambda seconds: None)
-    path = tmp_path / "leases"
-    path.write_text("1791941144 b8:27:eb\n")
+    path = tmp_path / "ports.conf"
+    path.write_text("interface=v2101\n")
     with pytest.raises(GatewayFileError):
-        read_with_retry(path, parse_leases)
+        read_with_retry(path, parse_ports_conf)

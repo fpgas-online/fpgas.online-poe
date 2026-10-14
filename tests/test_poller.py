@@ -46,11 +46,20 @@ class Script:
         self.released = []
         self.release_ok = True
         self.published = []
+        self.kept_alive = 0
+        self.tables_read = 0
         self.now = 1_000_000.0
         self.poller = Poller(
-            specs=list(specs), read=self.read, port_addresses=lambda: self.addresses,
+            specs=list(specs), read=self.read, port_table=self.port_table,
             leases=lambda: list(self.leases), release=self.release, publish=self.published.append,
-            lease_seconds=LEASE_SECONDS, clock=lambda: self.now)
+            keepalive=self.keepalive, clock=lambda: self.now)
+
+    def port_table(self):
+        self.tables_read += 1
+        return self.addresses, LEASE_SECONDS
+
+    def keepalive(self):
+        self.kept_alive += 1
 
     def read(self, spec):
         answer = self.answers[spec.index].pop(0)
@@ -59,6 +68,8 @@ class Script:
         return answer
 
     def release(self, spec, port, cause):
+        # the watchdog was fed before this release
+        assert self.kept_alive == len(self.released) + 1
         self.released.append((spec.index, port, cause))
         return self.release_ok
 
@@ -251,3 +262,36 @@ def test_two_switches_are_kept_apart():
     assert s.poll(rows(SPEC, 300, {}), rows(OTHER, 300, {3: 2}, {3: 250})) == [(1, 3, "down")]
     assert s.released == [(1, 3, "link-down")]
     assert s.published[0]["hostname"] == "pi-sw1-p3"
+
+
+def test_a_lease_from_before_the_lease_time_was_shortened_is_released():
+    s = Script()
+    s.poll(rows(SPEC, 100, {3: 2}))
+    # a 12 h lease granted 2 h ago: 10 h left, longer than the 5 min lease time any lease granted now gets
+    s.leases = [Lease("10.21.2.3", int(s.now) + 10 * 3600)]
+    s.poll(rows(SPEC, 300, {3: 2}))
+    assert s.released == [(2, 3, "down-port")]
+
+
+def test_ports_conf_is_read_again_for_each_check():
+    s = Script()
+    s.leases = [Lease("10.21.2.3", 0)]
+    for uptime in (100, 300, 500):
+        s.poll(rows(SPEC, uptime, {3: 2}))
+    assert s.tables_read == 2  # the second and third polls each checked
+
+
+def test_up_then_no_reading_then_down_is_a_change_to_down():
+    s = Script()
+    s.poll(rows(SPEC, 100, {}))
+    assert s.poll(rows(SPEC, 300, {3: 5}, {3: 250})) == []
+    assert s.poll(rows(SPEC, 500, {3: 2}, {3: 450})) == [(2, 3, "down")]
+    assert s.released == [(2, 3, "link-down")]
+
+
+def test_a_reboot_keeps_the_known_state_so_a_port_still_down_after_it_is_no_change():
+    s = Script()
+    s.poll(rows(SPEC, 100_000, {3: 2}))
+    s.poll(rows(SPEC, 500, {3: 2}, {3: 400}))  # rebooted: a new baseline
+    assert s.poll(rows(SPEC, 700, {3: 2}, {3: 400})) == []
+    assert s.poll(rows(SPEC, 900, {}, {3: 850})) == [(2, 3, "up")]

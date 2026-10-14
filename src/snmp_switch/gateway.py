@@ -3,8 +3,8 @@
 ``/etc/dnsmasq.d/ports.conf`` (rendered by fpgas.online-infra's ``pxe`` role) gives each per-port interface
 ``v<vlan>`` its one IPv4 and one IPv6 address and the lease time. The lease file is dnsmasq's
 ``/var/lib/misc/dnsmasq.leases``. Its content comes partly from clients (host names, client ids), and dnsmasq
-rewrites it in place, so a reader can catch it half written: it is parsed strictly, and a read that does not parse
-whole is retried and then reported as an error, never taken as "no leases".
+rewrites it in place, so a reader can catch it half written. ports.conf is ours and is parsed strictly; from the
+lease file only each lease's address and expiry are taken, and a line that is not a lease is passed over.
 """
 
 import ipaddress
@@ -20,9 +20,6 @@ _IFACE = re.compile(r"v([0-9]{4})")
 _RANGE = re.compile(r"dhcp-range=tag:(v[0-9]{4}),([^,]+),([^,]+),(.*)")
 _LEASE_TIME = re.compile(r"([0-9]+)([smhd]?)")
 _UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
-_HEX_ID = re.compile(r"\*|[0-9a-f]{2}(:[0-9a-f]{2})*")
-_MAC = re.compile(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}")
-_NAME = re.compile(r"\*|[A-Za-z0-9][A-Za-z0-9.-]{0,252}")
 
 READ_TRIES = 3
 READ_PAUSE = 0.2
@@ -72,30 +69,26 @@ def parse_ports_conf(text):
 
 
 def parse_leases(text):
-    """[Lease] from dnsmasq's lease file. GatewayFileError on any line that is not a lease, a `duid` line, or
-    blank. v4 line: expiry mac address hostname client-id; v6 line: expiry iaid address hostname client-duid."""
+    """[Lease] from dnsmasq's lease file, from every line that is a lease: v4 `expiry mac address hostname
+    client-id`, v6 `expiry [T]iaid address hostname client-duid`. Only the expiry and the address are used, and any
+    other line (the `duid` line, a line caught half written) is passed over: a lease missed this way only waits for
+    the next poll, and nothing read from the file reaches a command."""
     leases = []
-    for number, line in enumerate(text.splitlines(), 1):
+    for line in text.splitlines():
         fields = line.split()
-        if not fields:
+        if len(fields) < 3 or not fields[0].isdigit():
             continue
-        if fields[0] == "duid":
-            if len(fields) != 2 or not _HEX_ID.fullmatch(fields[1]):
-                raise GatewayFileError(f"line {number}: bad duid line")
-            continue
-        if len(fields) != 5 or not fields[0].isdigit() or not _NAME.fullmatch(fields[3]) \
-                or not _HEX_ID.fullmatch(fields[4]):
-            raise GatewayFileError(f"line {number}: not a lease line")
         try:
             address = ipaddress.ip_address(fields[2])
         except ValueError:
-            raise GatewayFileError(f"line {number}: bad address") from None
-        if address.version == 4 and not _MAC.fullmatch(fields[1]):
-            raise GatewayFileError(f"line {number}: bad MAC")
-        if address.version == 6 and not fields[1].isdigit():
-            raise GatewayFileError(f"line {number}: bad IAID")
+            continue
         leases.append(Lease(str(address), int(fields[0])))
     return leases
+
+
+def read_leases(path=LEASE_FILE):
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return parse_leases(f.read())
 
 
 def read_with_retry(path, parse, tries=READ_TRIES, pause=READ_PAUSE):

@@ -108,23 +108,6 @@ class Change:
                 "link": self.link, "at": self.at}
 
 
-def changes(spec, previous, current, at):
-    """The port changes between two complete readings of one switch. None before the first reading, and none across
-    a switch reboot (sysUpTime went backwards): those readings are a new baseline."""
-    if previous is None or current.uptime < previous.uptime:
-        return []
-    out = []
-    for p in board_ports(spec):
-        before, now = link(previous.oper[p]), link(current.oper[p])
-        if before is None or now is None:
-            continue
-        if before != now:
-            out.append(Change(spec.index, p, hostname(spec.index, p), now, at))
-        elif current.last_change[p] != previous.last_change[p]:
-            out.append(Change(spec.index, p, hostname(spec.index, p), "bounced", at))
-    return out
-
-
 @dataclass(frozen=True)
 class Lease:
     address: str
@@ -146,21 +129,27 @@ class Poller:
     """See the module docstring. The callables:
 
     - ``read(spec) -> rows``: one SNMP GET of request_oids(spec); raises on any failure;
-    - ``port_addresses() -> {(switch, port): {address, ...}}``: each board port's own v4 and v6 addresses;
-    - ``leases() -> [Lease]``: the gateway's current DHCP leases; raises when the lease file cannot be read whole;
+    - ``port_table() -> ({(switch, port): {address, ...}}, lease seconds)``: each board port's own v4 and v6
+      addresses and the per-port lease time, read afresh for each reconciliation (ports.conf can change);
+    - ``leases() -> [Lease]``: the gateway's current DHCP leases;
     - ``release(spec, port, cause) -> bool``: release that port's leases; True when the release was confirmed;
-    - ``publish(record)``: send a port change record to the site.
+    - ``publish(record)``: send a port change record to the site;
+    - ``keepalive()``: called before each release, which can take seconds (the systemd watchdog).
+
+    A change is a port's link reading differing from the last *known* one: a reading that is neither up nor down
+    (``link`` None) leaves the known state as it was, so up, then unknown, then down is still a change to down.
     """
 
     specs: list
     read: object
-    port_addresses: object
+    port_table: object
     leases: object
     release: object
     publish: object
-    lease_seconds: int
+    keepalive: object = lambda: None
     clock: object = time.time
     last: dict = field(default_factory=dict)
+    known: dict = field(default_factory=dict)
     watch: dict = field(default_factory=dict)
     silent: set = field(default_factory=set)
     polls: int = 0
@@ -178,7 +167,7 @@ class Poller:
             current = self._read(spec)
             if current is None:
                 continue
-            found = changes(spec, self.last.get(spec.index), current, at)
+            found = self._changes(spec, self.last.get(spec.index), current, at)
             self.last[spec.index] = current
             for change in found:
                 self.totals["changes"] += 1
@@ -197,8 +186,28 @@ class Poller:
                 else:
                     w.down_polls, w.down_since = 0, None
         if down:
-            self._reconcile(down)
+            self._reconcile(down, now)
         return seen
+
+    def _changes(self, spec, previous, current, at):
+        """The port changes this reading shows. Nothing on the first reading of a switch, and nothing across a
+        switch reboot (sysUpTime went backwards): both are a new baseline. A reboot cut every board's power, but
+        each board's lease is then its own again as it boots, and a port left down is caught by the reconciliation."""
+        rebooted = previous is not None and current.uptime < previous.uptime
+        out = []
+        for p in board_ports(spec):
+            now = link(current.oper[p])
+            if now is None:
+                continue
+            before = self.known.get((spec.index, p))
+            self.known[(spec.index, p)] = now
+            if previous is None or rebooted or before is None:
+                continue
+            if before != now:
+                out.append(Change(spec.index, p, hostname(spec.index, p), now, at))
+            elif link(previous.oper[p]) == now and current.last_change[p] != previous.last_change[p]:
+                out.append(Change(spec.index, p, hostname(spec.index, p), "bounced", at))
+        return out
 
     def _read(self, spec):
         try:
@@ -215,10 +224,10 @@ class Poller:
             log.info("switch %s: answering again", spec.index)
         return current
 
-    def _reconcile(self, down):
+    def _reconcile(self, down, now):
         try:
             leases = self.leases()
-            addresses = self.port_addresses()
+            addresses, lease_seconds = self.port_table()
         except Exception as exc:  # reported once until a read works again, not every poll
             if not self.tables_failing:
                 self.tables_failing = True
@@ -234,16 +243,23 @@ class Poller:
         for spec, p in down:
             w = self.watch[(spec.index, p)]
             held = [lease for a in addresses.get((spec.index, p), ()) for lease in by_address.get(a, ())]
-            # only a lease granted before the port was first read down: one granted while a read ran is left alone
-            stale = [lease for lease in held
-                     if lease.expires == 0 or lease.expires - self.lease_seconds < w.down_since]
-            if stale:
+            if any(self._stale(lease, w.down_since, now, lease_seconds) for lease in held):
                 self._release(spec, p, "down-port")
+
+    @staticmethod
+    def _stale(lease, down_since, now, lease_seconds):
+        """Whether a lease on a down port was granted before the port was first read down. A lease's grant time is
+        its expiry less the lease time. A lease that never expires, or runs longer than the current lease time
+        (granted under an earlier, longer one), was granted before any reading this poller made."""
+        if lease.expires == 0 or lease.expires - now > lease_seconds:
+            return True
+        return lease.expires - lease_seconds < down_since
 
     def _release(self, spec, port, cause):
         w = self.watch.setdefault((spec.index, port), PortWatch())
         if self.polls < w.retry_at_poll:
             return
+        self.keepalive()
         if self.release(spec, port, cause):
             self.totals["releases"] += 1
             w.failures, w.retry_at_poll = 0, 0
