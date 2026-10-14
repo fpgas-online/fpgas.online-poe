@@ -15,7 +15,9 @@ from django.views.decorators.http import require_POST
 from netgear_switch.errors import NetgearSwitchError
 
 from snmp_switch.policy import port_policy, release_toggle_claim, seconds_until_toggle_allowed
+from snmp_switch.release import start_release
 from snmp_switch.switches import PoeConfigError, PoeNotABoardPort, PoeRequestError, open_port, requested_port
+from switch_setup.plan import hostname
 
 log = logging.getLogger(__name__)
 
@@ -92,26 +94,33 @@ def poe_view(fn=None, *, with_request=False):
     return wrapper
 
 
-def notify_dcws(port, gs, state):
+def board_group(ref):
+    """The channel group the board page of `ref`'s port listens on: pistat_<the Pi's hostname> (pi-sw2-p46) on the
+    per-port-VLAN switches, pistat_pi<port> on the legacy single switch, whose pages are named by port alone."""
+    if ref.switch is None:
+        return f"pistat_pi{ref.port}"
+    return f"pistat_{hostname(ref.switch, ref.port)}"
 
-    # send message to browser via web socket
 
-    pi_name=f"pi{port}"
-    group = f"pistat_{pi_name}"
-    message_type="stat.message"
-    message_text=f"snmp: {gs} power {state}"
+def notify_dcws(ref, gs, state):
+    """One "snmp: <gs> power <state>" line in the status log of the board page for `ref`."""
     channel_layer = get_channel_layer()
-    async_to_sync(channel_layer.group_send)( group, {"type": message_type, "message": message_text} )
+    async_to_sync(channel_layer.group_send)(
+        board_group(ref), {"type": "stat.message", "message": f"snmp: {gs} power {state}"})
+
+
+def release_lease(ref, cause):
+    """Release the port's DHCP leases in the background (snmp_switch.release); per-port-VLAN switches only."""
+    if ref.switch is not None:
+        start_release(ref.switch, ref.port, cause)
 
 
 @poe_view
 def status(ref):
     # get_state (it's a getter yo.)
 
-    state = open_port(ref).state()
-    notify_dcws(ref.port, "get", state)
-
-    return JsonResponse({'state': state})
+    # no status-log line: every viewer of the board would get one for each page load
+    return JsonResponse({'state': open_port(ref).state()})
 
 
 @poe_view
@@ -139,7 +148,7 @@ def toggle(ref):
         off, off_error = None, e
     else:
         off_error = None
-        notify_dcws(ref.port, "set", off)
+        notify_dcws(ref, "set", off)
         time.sleep(.5)
 
     # On, and not left at one try: a port this view switched off must not
@@ -158,6 +167,11 @@ def toggle(ref):
         if on_error is None:
             break
 
+    if off_error is None and off == "off":
+        # the switch confirmed the port off, so the board lost power (whether or not "on" is confirmed below): its
+        # lease goes, and it takes the address afresh as it boots
+        release_lease(ref, "power-cycle")
+
     if on_error is not None:
         # no power cycle to protect, and someone has to be able to switch
         # the port back on: the next Reset must not be told to wait
@@ -167,7 +181,7 @@ def toggle(ref):
                       f'back on ({on_error}). The port may be off: press Reset again, it can be '
                       f'tried again at once'},
             status=502)
-    notify_dcws(ref.port, "set", on)
+    notify_dcws(ref, "set", on)
     if off_error is not None:
         release_toggle_claim(ref)
         return JsonResponse(
@@ -248,5 +262,7 @@ def power(ref, request, body):
         log.exception("%s: switching %s failed", ref, "on" if on else "off")
         return JsonResponse({'error': f'switch: the write failed ({type(e).__name__}); try again'}, status=502)
     log_power(ref, on, request, state)
-    notify_dcws(ref.port, "set", state)
+    notify_dcws(ref, "set", state)
+    if not on and state == "off":
+        release_lease(ref, "power-off")
     return JsonResponse({'state': state})
