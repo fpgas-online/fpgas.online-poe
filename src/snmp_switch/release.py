@@ -21,7 +21,7 @@ SUDO = "/usr/bin/sudo"
 SCRIPT = "/usr/local/sbin/fpgas-release-port-lease"
 CAUSES = ("link-down", "power-cycle", "power-off", "down-port")
 # The script's own worst case: a 30 s wait for another release's lock, then 10 s per tool, 8 s for the lease file and
-# a few seconds of reads: about 61 s. The poller's systemd watchdog (WatchdogSec=120, fpgas.online-infra) must stay
+# a few seconds of reads: about 61 s (81 s only if every limit, publishing included, were hit at once). The poller's systemd watchdog (WatchdogSec=120, fpgas.online-infra) must stay
 # above this; it is kept alive before each release.
 TIMEOUT = 75
 

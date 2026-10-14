@@ -114,7 +114,7 @@ of the per-port-VLAN switches (`snmp_switch/poller.py`):
   published as JSON `{"schema": 1, "switch", "port", "hostname", "link", "at"}` on MQTT topic
   `fpgas/<SWITCH_POLLER_SITE>/gw/port` (the broker in `FLEET_MQTT`). The site turns it into the board page's
   status line, the switch dashboard's update and the registry's record.
-- A port that goes down has its leases released at once; one that bounced, the leases granted before the bounce. On every poll, a port read down twice in a row
+- A port that goes down has its leases released at once; one that bounced, the leases granted before the last reading before the bounce. On every poll, a port read down twice in a row
   that still holds a lease granted before it went down has that lease released. Each release is one line in the
   gateway's journal (`fpgas-lease-release`); a failing port is tried again after 1, 2, 4 ... polls.
 - For each check it reads the gateway's `/etc/dnsmasq.d/ports.conf` (each port's addresses and lease time; strictly)
