@@ -917,6 +917,13 @@ def test_an_off_the_switch_answers_on_releases_nothing(scripted, no_release):
     assert post("/power", {"switch": 2, "port": PORT, "on": False}).status_code == 200
 
 
+def test_an_on_the_switch_answers_off_holds_nothing(scripted, no_release):
+    scripted("off")
+    assert post("/power", {"switch": 2, "port": PORT, "on": True}).json() == {"state": "off", "next_in": 0}
+    # the port is as it was, so it is not held: the on can be tried again at once
+    assert post("/power", {"switch": 2, "port": PORT, "on": True}).status_code == 200
+
+
 def test_the_legacy_switch_has_no_lease_to_release(legacy_switch, no_release):
     assert post("/toggle", {"port": "9"}).status_code == 200
     assert no_release == []
