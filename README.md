@@ -63,7 +63,7 @@ These are set by the [fpgas.online-infra](https://github.com/fpgas-online/fpgas.
 
 ### Which requests the Django views act on
 
-`/snmp/status`, `/snmp/toggle` and `/snmp/power` take a JSON body `{"port": ..., "switch": ...}` by
+`/snmp/status`, `/snmp/toggle`, `/snmp/power` and `/snmp/link` take a JSON body `{"port": ..., "switch": ...}` by
 POST and need no login, so the Django project that routes them must say which ports
 they may touch. Until it does, every request is refused (503): the package is never
 an open endpoint by default.
@@ -91,6 +91,8 @@ What a request gets:
 Every error is JSON `{"error": "<reason>"}`.
 
 `/snmp/power` takes `{"port": ..., "switch": ..., "on": true|false}` (`on` must be a JSON boolean, else 400) and sets that port on or off, with no cycle. It answers `{"state": "on"|"off", "next_in": <seconds>}`, `next_in` being how long the port is now held (the page counts it down); when the switch reads back the other state (it did not take the request) the port is not held and `next_in` is 0. It is guarded exactly like `toggle` and shares its per-port hold (a `toggle` and a `power` of one port count against each other). Every request that reaches the switch, or is turned away by the limit, logs one INFO line through `snmp_switch.views`: `poe <on|off> switch=S port=P from=<client address> ua=<user agent> result=<state, error ... or rate-limited Ns>`. The client address is nginx's `X-Real-IP` (the peer it saw), else `REMOTE_ADDR`; the user agent is cut to 200 characters with control characters removed.
+
+`/snmp/link` takes `{"port": ..., "switch": ..., "enabled": true|false}` and enables or disables that port at the switch (IF-MIB `ifAdminStatus`): the switch dashboard's link badge (Tim, 17 Oct 2026: "Clicking the badge should turn the link on / off"). It answers `{"link": "enabled"|"disabled", "next_in": <seconds>}`, the state read back from the switch. It has the same guards as `power` (an access port only: never a trunk or uplink, refused before the policy is asked; the site's policy; same-origin JSON) and the same holds, kept apart from the power's (a port's link and its PoE do not wait on each other). A write the switch does not read back is a 502 and holds nothing. The legacy single switch has no link control (503). Each request logs one INFO line `link <enable|disable> switch=S port=P from=... ua=... result=...`, and the board's page is told `snmp: set link <state>`. The dashboard's reading carries each port's `admin_enabled`.
 
 The access-port bound needs the switches file, so it exists on the per-port-VLAN scheme only. The legacy single switch has no description of its ports: there the policy alone decides. The switches file has no notion of a service port: one inside the access range is treated like any other access port (accepted only if the policy offers it).
 

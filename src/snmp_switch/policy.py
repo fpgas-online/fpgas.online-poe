@@ -88,11 +88,17 @@ def hold_after(on):
     return _seconds(ON_AFTER_OFF_SETTING, DEFAULT_ON_AFTER_OFF)
 
 
-def _claim_key(ref):
-    return f"snmp_switch:toggle:{'legacy' if ref.switch is None else ref.switch}:{ref.port}"
+# what a claim holds: the port's power ("toggle", shared by /toggle and /power) or its link (/link), held apart
+KINDS = ("toggle", "link")
 
 
-def seconds_until_toggle_allowed(ref, leaves_on):
+def _claim_key(ref, kind="toggle"):
+    if kind not in KINDS:
+        raise ValueError(f"no such hold: {kind!r}")
+    return f"snmp_switch:{kind}:{'legacy' if ref.switch is None else ref.switch}:{ref.port}"
+
+
+def seconds_until_toggle_allowed(ref, leaves_on, kind="toggle"):
     """Claim this port for a request that leaves it on (`leaves_on`: a switch
     on, or a power cycle) or off. 0 when the claim was taken (go ahead),
     otherwise the seconds until the port may be switched again. The claim
@@ -100,7 +106,9 @@ def seconds_until_toggle_allowed(ref, leaves_on):
     long the next request waits. It is taken in one atomic step (cache.add),
     so of two requests that arrive together only one goes ahead. The view
     gives it back (release_toggle_claim) when the switch did not carry the
-    request out."""
+    request out. `kind` says what is held: the port's power ("toggle") or
+    its link ("link"); the two are held apart, with the same holds (a link
+    switched off may be switched on again after the short one)."""
     hold = hold_after(leaves_on)
     longest = max(hold_after(True), hold_after(False))
     alias = getattr(settings, RATE_LIMIT_CACHE_SETTING, None)
@@ -108,7 +116,7 @@ def seconds_until_toggle_allowed(ref, leaves_on):
         raise PoeConfigError(
             f"PoE control is refused: this site has no shared store for the ports' holds "
             f"({RATE_LIMIT_CACHE_SETTING} is not set)")
-    key = _claim_key(ref)
+    key = _claim_key(ref, kind)
     now = time.time()
     try:
         cache = caches[alias]
@@ -124,11 +132,11 @@ def seconds_until_toggle_allowed(ref, leaves_on):
     return min(longest, max(1, math.ceil(until - now))) if isinstance(until, (int, float)) else 1
 
 
-def release_toggle_claim(ref):
+def release_toggle_claim(ref, kind="toggle"):
     """Give the claim back: the power cycle it was taken for did not happen
     (or did not finish), so the port may be tried again at once. A store that
     cannot be asked is logged and left: the claim then runs out by itself."""
     try:
-        caches[getattr(settings, RATE_LIMIT_CACHE_SETTING)].delete(_claim_key(ref))
+        caches[getattr(settings, RATE_LIMIT_CACHE_SETTING)].delete(_claim_key(ref, kind))
     except Exception:
         log.exception("could not release the hold on %s", ref)

@@ -543,10 +543,31 @@ def test_an_entry_this_code_cannot_read_is_a_miss(head, cache, clock, reads):
 
 def test_an_entry_cached_before_the_vlan_fields_still_reads():
     old = {"index": 1, "name": "n", "model": "m", "reachable": True, "error": "", "read_at": "2026-10-09T12:00:00+09:30",
-           "good_at": None, "ports": [{"port": 1, "label": "x", "link_up": True}]}
+           "good_at": None, "ports": [{"port": 1, "label": "x", "admin_enabled": True, "link_up": True}]}
     view = dashboard._from_dict(old)
     assert view.vlans == [] and view.ports[0].pvid is None
     assert view.ports[0].untagged_vlans == [] and view.ports[0].tagged_vlans == []
+
+
+def test_an_entry_cached_before_the_admin_state_is_a_miss():
+    """Its default (enabled) would be a guess: the link badge would show a disabled port as enabled for one cache
+    period. Read afresh instead."""
+    old = {"index": 1, "name": "n", "model": "m", "reachable": True, "error": "", "read_at": "2026-10-09T12:00:00+09:30",
+           "good_at": None, "ports": [{"port": 1, "label": "x", "link_up": True}]}
+    assert dashboard._from_dict(old) is None
+
+
+def test_a_port_disabled_at_the_switch_reads_as_such(monkeypatch, tmp_path):
+    vs = VirtualSwitch("gsm7228ps", community=COMMUNITY)
+    vs.state.ports[5].admin = False
+    vs.start()
+    try:
+        configure(monkeypatch, tmp_path, (2, "s3300", vs))
+        (view,) = dashboard.read_all()
+    finally:
+        vs.stop()
+    ports = {p.port: p for p in view.ports}
+    assert ports[5].admin_enabled is False and ports[6].admin_enabled is True
 
 
 def test_a_v1_cache_entry_is_not_served(head, cache, clock, reads):
@@ -652,3 +673,17 @@ def test_the_neighbours_port_description_is_kept_beside_its_port_id():
     one, two = dashboard._build_ports(ifs, None, None, lldp, None, port_count=52)
     assert (one.lldp_port, one.lldp_port_desc) == ("02:00:5e:00:00:01", "eth0")
     assert (two.lldp_port, two.lldp_port_desc) == ("1/0/50", None)
+
+
+def test_a_port_disabled_through_the_library_reads_as_such_at_the_next_reading(monkeypatch, tmp_path):
+    """The real path of the dashboard's link badge: /snmp/link writes ifAdminStatus, the next reading shows it."""
+    from snmp_switch.switches import configured_specs, library_switch
+
+    vs = serve("gsm7228ps")
+    try:
+        configure(monkeypatch, tmp_path, (2, "s3300", vs))
+        library_switch(configured_specs()[0]).set_port_enabled(5, False)
+        (view,) = dashboard.read_all()
+    finally:
+        vs.stop()
+    assert {p.port: p for p in view.ports}[5].admin_enabled is False

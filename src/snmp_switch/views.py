@@ -102,11 +102,12 @@ def board_group(ref):
     return f"pistat_{hostname(ref.switch, ref.port)}"
 
 
-def notify_dcws(ref, gs, state):
-    """One "snmp: <gs> power <state>" line in the status log of the board page for `ref`."""
+def notify_dcws(ref, gs, state, what="power"):
+    """One "snmp: <gs> <what> <state>" line ("snmp: set power off", "snmp: set link disabled") in the status log of
+    the board page for `ref`."""
     channel_layer = get_channel_layer()
     async_to_sync(channel_layer.group_send)(
-        board_group(ref), {"type": "stat.message", "message": f"snmp: {gs} power {state}"})
+        board_group(ref), {"type": "stat.message", "message": f"snmp: {gs} {what} {state}"})
 
 
 def release_lease(ref, cause):
@@ -272,3 +273,48 @@ def power(ref, request, body):
         release_toggle_claim(ref)
         hold = 0
     return JsonResponse({'state': state, 'next_in': hold})
+
+
+def log_link(ref, enabled, request, result):
+    """The one INFO line for a link request, as log_power's."""
+    log.info("link %s switch=%s port=%s from=%s ua=%s result=%s",
+             'enable' if enabled else 'disable', ref.switch if ref.switch is not None else '-', ref.port,
+             client_address(request), client_agent(request), result)
+
+
+@poe_view(with_request=True)
+def link(ref, request, body):
+    # enable or disable the port at the switch (IF-MIB ifAdminStatus): the dashboard's link badge (Tim, 17 Oct 2026:
+    # "Clicking the badge should turn the link on / off"). The same guards as power (an access port only, the site's
+    # policy, same-origin JSON) and the same holds, kept apart from the power's.
+    enabled = body.get('enabled')
+    if not isinstance(enabled, bool):
+        raise PoeRequestError("'enabled' must be true or false")
+
+    hold = hold_after(enabled)
+    wait = seconds_until_toggle_allowed(ref, leaves_on=enabled, kind="link")
+    if wait:
+        log_link(ref, enabled, request, f'rate-limited {wait}s')
+        response = JsonResponse(
+            {'error': f'the link of {ref} was switched a moment ago; try again in {wait} seconds. '
+                      f'Nothing was sent to the switch'},
+            status=429)
+        response['Retry-After'] = str(wait)
+        return response
+
+    try:
+        state = open_port(ref).set_link(enabled)
+    except Exception as e:
+        # the switch did not take it (the library reads it back), or did not answer: someone may try again at once
+        release_toggle_claim(ref, kind="link")
+        log_link(ref, enabled, request, f'error {type(e).__name__}')
+        if isinstance(e, (NetgearSwitchError, PoeConfigError, PoeRequestError)):
+            raise  # poe_view answers these (502, 503, 400)
+        log.exception("%s: %s the link failed", ref, "enabling" if enabled else "disabling")
+        return JsonResponse({'error': f'switch: the write failed ({type(e).__name__}); try again'}, status=502)
+    log_link(ref, enabled, request, state)
+    notify_dcws(ref, "set", state, what="link")
+    if state != ("enabled" if enabled else "disabled"):
+        release_toggle_claim(ref, kind="link")
+        hold = 0
+    return JsonResponse({'link': state, 'next_in': hold})

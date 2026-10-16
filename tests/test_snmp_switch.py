@@ -927,3 +927,106 @@ def test_an_on_the_switch_answers_off_holds_nothing(scripted, no_release):
 def test_the_legacy_switch_has_no_lease_to_release(legacy_switch, no_release):
     assert post("/toggle", {"port": "9"}).status_code == 200
     assert no_release == []
+
+
+# --- /link: enable or disable a port at the switch (the dashboard's link badge, Tim, 17 Oct 2026) ------------------
+
+
+def link(body, **headers):
+    return Client().post("/link", data=json.dumps(body), content_type="application/json", **headers)
+
+
+def link_lines(caplog):
+    return [r for r in caplog.records if r.name == LOGGER and r.getMessage().startswith("link ")]
+
+
+def test_disable_then_enable_sets_the_ports_admin_state(switch_2):
+    assert switch_2.state.ports[PORT].admin is True
+    r = link({"switch": 2, "port": PORT, "enabled": False})
+    assert (r.status_code, r.json()) == (200, {"link": "disabled", "next_in": 10})
+    assert switch_2.state.ports[PORT].admin is False
+    # the short hold: enabling it again inside it is a 429 that names the link, and nothing is sent
+    r = link({"switch": 2, "port": PORT, "enabled": True})
+    assert r.status_code == 429 and 1 <= int(r["Retry-After"]) <= 10 and "the link of switch 2" in r.json()["error"]
+    assert switch_2.state.ports[PORT].admin is False
+    caches["poe-rate-limit"].clear()
+    r = link({"switch": 2, "port": PORT, "enabled": True})
+    assert (r.status_code, r.json()) == (200, {"link": "enabled", "next_in": 60})
+    assert switch_2.state.ports[PORT].admin is True
+
+
+def test_the_link_and_the_power_are_held_apart(switch_2):
+    assert link({"switch": 2, "port": PORT, "enabled": False}).status_code == 200
+    assert power({"switch": 2, "port": PORT, "on": False}).status_code == 200
+    assert link({"switch": 2, "port": PORT, "enabled": True}).status_code == 429
+    caches["poe-rate-limit"].clear()
+    assert link({"switch": 2, "port": PORT, "enabled": True}).status_code == 200
+
+
+@pytest.mark.parametrize("enabled", [None, "true", 1, 0, "off", [], {}])
+def test_enabled_must_be_a_json_boolean(switch_2_untouchable, enabled):
+    r = link({"switch": 2, "port": PORT, "enabled": enabled})
+    assert r.status_code == 400 and "'enabled'" in r.json()["error"]
+
+
+def test_a_link_request_for_a_port_the_site_does_not_offer_is_refused(switch_2_untouchable):
+    policy.OFFERED.clear()
+    assert link({"switch": 2, "port": PORT, "enabled": False}).status_code == 403
+    assert (2, PORT) in policy.ASKED
+
+
+@pytest.mark.parametrize("port", [TRUNK_PORT, UPLINK_PORT, 49])
+def test_the_gateway_trunk_and_the_uplink_can_never_be_disabled(switch_2_untouchable, port):
+    """Disabling the trunk would cut the site off its own switch: refused before the site's policy is asked, whatever
+    it would say, and nothing reaches the switch (switch_2_untouchable fails the test on any traffic)."""
+    policy.OFFERED.add((2, port))
+    assert link({"switch": 2, "port": port, "enabled": False}).status_code == 403
+    assert caches["poe-rate-limit"]._cache == {}
+
+
+@pytest.mark.parametrize("site", ["cross-site", "same-site", "none"])
+def test_a_link_request_from_anywhere_but_our_own_pages_is_refused(switch_2_untouchable, site):
+    assert link({"switch": 2, "port": PORT, "enabled": False}, HTTP_SEC_FETCH_SITE=site).status_code == 403
+
+
+def test_a_form_post_to_link_is_refused(switch_2_untouchable):
+    r = Client().post("/link", data={"switch": 2, "port": PORT, "enabled": "false"})
+    assert r.status_code == 403
+
+
+def test_the_legacy_switch_has_no_link_control(legacy_switch):
+    r = link({"port": 9, "enabled": False})
+    assert r.status_code == 503 and "link control needs the switches file" in r.json()["error"]
+    assert legacy_switch == []
+    # the hold was given back: nothing happened
+    assert caches["poe-rate-limit"]._cache == {}
+
+
+def test_a_disable_the_switch_did_not_take_is_a_502_and_holds_nothing(switch_2, monkeypatch):
+    from netgear_switch.errors import WriteVerificationError
+
+    def refuse(self, port, enabled, **kw):
+        raise WriteVerificationError(f"admin state for port {port} did not read back as {enabled}", before=None,
+                                     after=None)
+    with monkeypatch.context() as m:
+        m.setattr(switches.SyncSwitch, "set_port_enabled", refuse)
+        r = link({"switch": 2, "port": PORT, "enabled": False})
+    assert r.status_code == 502 and r.json()["error"].startswith("switch:")
+    assert switch_2.state.ports[PORT].admin is True
+    assert link({"switch": 2, "port": PORT, "enabled": False}).status_code == 200
+
+
+def test_one_info_line_per_link_request_and_the_board_page_is_told(switch_2, caplog, monkeypatch):
+    told = []
+    monkeypatch.setattr("snmp_switch.views.notify_dcws", lambda *a, **k: told.append((a, k)))
+    caplog.set_level(logging.INFO)
+    link({"switch": 2, "port": PORT, "enabled": False}, HTTP_X_REAL_IP="192.0.2.7", HTTP_USER_AGENT="ua")
+    (line,) = link_lines(caplog)
+    assert line.getMessage() == f"link disable switch=2 port={PORT} from=192.0.2.7 ua=ua result=disabled"
+    assert [(a[1:], k) for a, k in told] == [(("set", "disabled"), {"what": "link"})]
+    assert switch_2.community not in caplog.text
+
+
+@pytest.mark.parametrize("method", ["get", "put", "delete"])
+def test_link_answers_only_post(switch_2_untouchable, method):
+    assert getattr(Client(), method)("/link").status_code == 405
