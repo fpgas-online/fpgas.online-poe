@@ -312,6 +312,12 @@ def link(ref, request, body):
             raise  # poe_view answers these (502, 503, 400)
         log.exception("%s: %s the link failed", ref, "enabling" if enabled else "disabling")
         return JsonResponse({'error': f'switch: the write failed ({type(e).__name__}); try again'}, status=502)
+    if state is None:
+        # the switch no longer lists the port: nothing is known of its state, so say so rather than answer null
+        release_toggle_claim(ref, kind="link")
+        log_link(ref, enabled, request, 'error port-not-listed')
+        return JsonResponse({'error': f'switch: {ref} is not listed by the switch after the write; '
+                                      f'its link state is not known'}, status=502)
     log_link(ref, enabled, request, state)
     notify_dcws(ref, "set", state, what="link")
     if state != ("enabled" if enabled else "disabled"):

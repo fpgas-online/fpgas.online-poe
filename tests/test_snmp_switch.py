@@ -982,6 +982,7 @@ def test_the_gateway_trunk_and_the_uplink_can_never_be_disabled(switch_2_untouch
     policy.OFFERED.add((2, port))
     assert link({"switch": 2, "port": port, "enabled": False}).status_code == 403
     assert caches["poe-rate-limit"]._cache == {}
+    assert policy.ASKED == []  # refused by the switches file before the site's policy is asked
 
 
 @pytest.mark.parametrize("site", ["cross-site", "same-site", "none"])
@@ -1025,6 +1026,51 @@ def test_one_info_line_per_link_request_and_the_board_page_is_told(switch_2, cap
     assert line.getMessage() == f"link disable switch=2 port={PORT} from=192.0.2.7 ua=ua result=disabled"
     assert [(a[1:], k) for a, k in told] == [(("set", "disabled"), {"what": "link"})]
     assert switch_2.community not in caplog.text
+
+
+class ScriptedLinkPort:
+    """A switch port whose set_link() answers are scripted: a state (or None: the port is not listed), or an
+    exception to raise."""
+
+    def __init__(self, answer):
+        self.answer = answer
+
+    def set_link(self, enabled):
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+@pytest.fixture()
+def scripted_link(switch_2_untouchable, monkeypatch):
+    def use(answer):
+        monkeypatch.setattr(views, "open_port", lambda ref: ScriptedLinkPort(answer))
+    return use
+
+
+def test_a_link_write_that_fails_unexpectedly_is_a_json_502_that_names_only_the_type(scripted_link):
+    scripted_link(RuntimeError("secret detail"))
+    r = link({"switch": 2, "port": PORT, "enabled": False})
+    assert r.status_code == 502 and r.json() == {"error": "switch: the write failed (RuntimeError); try again"}
+    assert caches["poe-rate-limit"]._cache == {}  # nothing changed, nothing held
+
+
+def test_a_link_the_switch_reads_back_unchanged_is_answered_and_holds_nothing(scripted_link):
+    scripted_link("enabled")
+    assert link({"switch": 2, "port": PORT, "enabled": False}).json() == {"link": "enabled", "next_in": 0}
+    assert caches["poe-rate-limit"]._cache == {}
+
+
+def test_a_port_the_switch_no_longer_lists_is_a_502_not_a_null(scripted_link):
+    scripted_link(None)
+    r = link({"switch": 2, "port": PORT, "enabled": False})
+    assert r.status_code == 502 and "is not listed by the switch" in r.json()["error"]
+    assert caches["poe-rate-limit"]._cache == {}
+
+
+def test_the_sites_own_fetch_switches_the_link(switch_2):
+    r = link({"switch": 2, "port": PORT, "enabled": False}, HTTP_SEC_FETCH_SITE="same-origin")
+    assert (r.status_code, r.json()) == (200, {"link": "disabled", "next_in": 10})
 
 
 @pytest.mark.parametrize("method", ["get", "put", "delete"])
