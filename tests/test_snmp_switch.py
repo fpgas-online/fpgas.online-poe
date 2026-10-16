@@ -317,7 +317,7 @@ def test_a_second_toggle_inside_the_interval_is_a_429_and_the_switch_is_left_alo
     r = post("/toggle", {"port": str(PORT), "switch": 2})
     assert r.status_code == 429
     assert 1 <= int(r["Retry-After"]) <= 60
-    assert (f"switch 2 port {PORT} was power-cycled a moment ago; try again in {r['Retry-After']} seconds"
+    assert (f"switch 2 port {PORT} was switched a moment ago; try again in {r['Retry-After']} seconds"
             in r.json()["error"])
     assert sets == [False, True]
     assert switch_2.state.poe[PORT].admin is True
@@ -500,7 +500,7 @@ def test_a_refused_port_takes_no_ones_turn(legacy_switch):
 
 @pytest.mark.parametrize("broken, reason", [
     ({"SNMP_SWITCH_RATE_LIMIT_CACHE": None}, "SNMP_SWITCH_RATE_LIMIT_CACHE is not set"),
-    ({"SNMP_SWITCH_RATE_LIMIT_CACHE": "no-such-cache"}, "rate limit store is not answering"),
+    ({"SNMP_SWITCH_RATE_LIMIT_CACHE": "no-such-cache"}, "the store of the ports' holds is not answering"),
     ({"SNMP_SWITCH_ON_AFTER_OFF": 0}, "SNMP_SWITCH_ON_AFTER_OFF must be"),
     ({"SNMP_SWITCH_ON_AFTER_OFF": None}, "SNMP_SWITCH_ON_AFTER_OFF must be"),
     ({"SNMP_SWITCH_OFF_AFTER_ON": True}, "SNMP_SWITCH_OFF_AFTER_ON must be"),
@@ -911,8 +911,10 @@ def test_a_reset_whose_off_failed_releases_nothing(scripted, no_release):
 
 def test_an_off_the_switch_answers_on_releases_nothing(scripted, no_release):
     scripted("on")
-    assert post("/power", {"switch": 2, "port": PORT, "on": False}).json() == {"state": "on", "next_in": 10}
+    assert post("/power", {"switch": 2, "port": PORT, "on": False}).json() == {"state": "on", "next_in": 0}
     assert no_release == []
+    # the port is as it was, so it is not held: the off can be tried again at once
+    assert post("/power", {"switch": 2, "port": PORT, "on": False}).status_code == 200
 
 
 def test_the_legacy_switch_has_no_lease_to_release(legacy_switch, no_release):

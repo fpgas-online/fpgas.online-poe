@@ -106,7 +106,7 @@ def seconds_until_toggle_allowed(ref, leaves_on):
     alias = getattr(settings, RATE_LIMIT_CACHE_SETTING, None)
     if not alias:
         raise PoeConfigError(
-            f"PoE control is refused: this site has no shared store for the power-cycle rate limit "
+            f"PoE control is refused: this site has no shared store for the ports' holds "
             f"({RATE_LIMIT_CACHE_SETTING} is not set)")
     key = _claim_key(ref)
     now = time.time()
@@ -117,8 +117,8 @@ def seconds_until_toggle_allowed(ref, leaves_on):
         until = cache.get(key)
     except Exception as e:
         # a store that cannot be asked is not permission to go ahead
-        log.exception("the power-cycle rate limit store (cache %r) failed", alias)
-        raise PoeConfigError("PoE control is refused: the power-cycle rate limit store is not answering") from e
+        log.exception("the store of the ports' holds (cache %r) failed", alias)
+        raise PoeConfigError("PoE control is refused: the store of the ports' holds is not answering") from e
     # the claim that beat this request may expire between add() and get()
     # (and never tell anyone to wait longer than the longest hold, whatever is stored)
     return min(longest, max(1, math.ceil(until - now))) if isinstance(until, (int, float)) else 1
@@ -131,4 +131,4 @@ def release_toggle_claim(ref):
     try:
         caches[getattr(settings, RATE_LIMIT_CACHE_SETTING)].delete(_claim_key(ref))
     except Exception:
-        log.exception("could not release the power-cycle claim on %s", ref)
+        log.exception("could not release the hold on %s", ref)

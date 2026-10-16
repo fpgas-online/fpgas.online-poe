@@ -130,7 +130,7 @@ def toggle(ref):
     wait = seconds_until_toggle_allowed(ref, leaves_on=True)
     if wait:
         response = JsonResponse(
-            {'error': f'{ref} was power-cycled a moment ago; try again in {wait} seconds. '
+            {'error': f'{ref} was switched a moment ago; try again in {wait} seconds. '
                       f'Nothing was sent to the switch'},
             status=429)
         response['Retry-After'] = str(wait)
@@ -242,6 +242,7 @@ def power(ref, request, body):
     if not isinstance(on, bool):
         raise PoeRequestError("'on' must be true or false")
 
+    hold = hold_after(on)
     wait = seconds_until_toggle_allowed(ref, leaves_on=on)
     if wait:
         log_power(ref, on, request, f'rate-limited {wait}s')
@@ -266,4 +267,8 @@ def power(ref, request, body):
     notify_dcws(ref, "set", state)
     if not on and state == "off":
         release_lease(ref, "power-off")
-    return JsonResponse({'state': state, 'next_in': hold_after(on)})
+    if state != ("on" if on else "off"):
+        # the switch did not take it: the port is as it was, so it is not held, and can be tried again at once
+        release_toggle_claim(ref)
+        hold = 0
+    return JsonResponse({'state': state, 'next_in': hold})
