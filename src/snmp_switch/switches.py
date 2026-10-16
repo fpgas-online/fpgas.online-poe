@@ -63,6 +63,20 @@ class LibraryPort:
         self.switch.set_poe(self.port, on)
         return self.state()
 
+    def link_state(self):
+        """"enabled" or "disabled": the port's administrative state (IF-MIB ifAdminStatus), not whether a link is
+        up; None when the switch does not list the port."""
+        status = next((p for p in self.switch.get_ports() if p.port == self.port), None)
+        if status is None:
+            return None
+        return "enabled" if status.admin_enabled else "disabled"
+
+    def set_link(self, enabled):
+        """Enable or disable the port (ifAdminStatus); the library reads it back and raises when the switch did not
+        take it. Answers link_state() read afterwards."""
+        self.switch.set_port_enabled(self.port, enabled)
+        return self.link_state()
+
 
 @dataclass
 class LegacyPort:
@@ -75,6 +89,10 @@ class LegacyPort:
 
     def set(self, on):
         return async_to_sync(snmp_set_state)(state="1" if on else "2", **self.params)["state"]
+
+    def set_link(self, enabled):
+        raise PoeConfigError("link control needs the switches file (the per-port-VLAN switches); "
+                             "the legacy single switch has none")
 
 
 # A switch index or a port number in a request: a whole number, sent as a JSON

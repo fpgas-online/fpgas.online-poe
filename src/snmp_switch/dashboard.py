@@ -74,6 +74,9 @@ _POE_STATES = {
 class PortView:
     port: int
     label: str | None = None  # ifAlias
+    # the port's administrative state (IF-MIB ifAdminStatus): False when the port is switched off at the switch, so
+    # it carries no link whatever is plugged in (the dashboard's link badge, which also switches it)
+    admin_enabled: bool = True
     link_up: bool = False
     speed_mbps: int | None = None
     # "disabled", "searching", "delivering", "fault" or "other"; None when the
@@ -195,7 +198,7 @@ def _build_ports(ports, poe, stats, lldp, macs, port_count, pvids=None, vlans=No
     untagged, tagged = _vlans_by_port(vlans or [])
     views = []
     for p in sorted((p for p in ports if 1 <= p.port <= port_count), key=lambda p: p.port):
-        v = PortView(port=p.port, label=p.description, link_up=p.link_up,
+        v = PortView(port=p.port, label=p.description, admin_enabled=p.admin_enabled, link_up=p.link_up,
                      speed_mbps=p.speed_mbps if p.link_up else None)
         if p.port in poe:
             v.poe_state = _POE_STATES.get(poe[p.port].detect, "other")
@@ -309,7 +312,11 @@ def read_all():
 def _from_dict(d):
     """A cached view, or None for an entry this code cannot read (written by
     another version): it is treated as a miss and read afresh. The VLAN fields
-    have defaults, so an entry written before they existed still reads."""
+    have defaults, so an entry written before they existed still reads. An
+    entry without the ports' admin state is a miss: its default (enabled)
+    would be a guess."""
+    if any("admin_enabled" not in p for p in d.get("ports", ())):
+        return None
     try:
         return SwitchView(**{**d, "ports": [PortView(**p) for p in d["ports"]]})
     except (TypeError, KeyError, AttributeError):
