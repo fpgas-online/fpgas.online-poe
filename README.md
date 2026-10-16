@@ -71,23 +71,26 @@ an open endpoint by default.
 | Django setting | Purpose |
 |----------------|---------|
 | `SNMP_SWITCH_PORT_POLICY` | Dotted path of a callable `policy(request, switch, port) -> bool`: whether that port is a board the site offers. `switch` is the switch's index (None on the legacy single switch), `port` an int. Answer it from the data the site's pages are built from, not from a list. Required. |
-| `SNMP_SWITCH_RATE_LIMIT_CACHE` | Alias in `CACHES` of the store for the power-cycle rate limit. It must be shared by every process serving the views (redis, memcached, the database), not per-process memory. Required for `/snmp/toggle`. |
-| `SNMP_SWITCH_TOGGLE_INTERVAL` | Seconds between two power cycles of one port. Optional, default 60. |
+| `SNMP_SWITCH_RATE_LIMIT_CACHE` | Alias in `CACHES` of the store that holds a port after each switch. It must be shared by every process serving the views (redis, memcached, the database), not per-process memory. Required for `/snmp/toggle` and `/snmp/power`. |
+| `SNMP_SWITCH_ON_AFTER_OFF` | Seconds a port is held after it was switched off, before it may be switched (on) again. Optional, default 10. |
+| `SNMP_SWITCH_OFF_AFTER_ON` | Seconds a port is held after it was switched on or power-cycled (a cycle ends on), before it may be switched (off, or cycled) again. Optional, default 60. |
+
+The wait depends on what was done last, and there is no other limit (Tim, 17 Oct 2026: "The time delay between power off to power on should be ~10 seconds. The time delay from power on -> power off should be ~60 seconds."). The single interval that came before, `SNMP_SWITCH_TOGGLE_INTERVAL`, is refused by name (503) so that a site still setting it hears about it.
 
 What a request gets:
 
 | Answer | When |
 |--------|------|
-| 200 | The port is a board the site offers (and, for `toggle`, was not power-cycled within the interval). |
+| 200 | The port is a board the site offers (and, for `toggle` and `power`, is not held by the last switch of it). |
 | 400 | The body is not JSON, or the port or switch is not a whole number in range, or the switch is not configured. |
 | 403 | The port is not one of the switch's access ports, or is one the switches file gives another job (gateway trunk, downstream trunk, uplink): refused before the policy is asked, so no registration, wrong or forged, can reach it. Or the policy says the port is not a board the site offers. Nothing is sent to the switch. |
-| 429 | `toggle` of a port that was power-cycled within the interval, with a `Retry-After` header. Nothing is sent to the switch. |
+| 429 | `toggle` or `power` of a port still held by its last switch, with a `Retry-After` header (seconds left). Nothing is sent to the switch. |
 | 502 | The switch did not answer. For `toggle`: "on" is tried again a few times after "off"; if the port may still be off, or the power cycle did not happen, the rate-limit claim is given back so that it can be tried again at once, and the error says so. |
 | 503 | No policy, no rate-limit store (or it is not answering), or no switch configured. |
 
 Every error is JSON `{"error": "<reason>"}`.
 
-`/snmp/power` takes `{"port": ..., "switch": ..., "on": true|false}` (`on` must be a JSON boolean, else 400) and sets that port on or off, with no cycle. It answers `{"state": "on"|"off"}`. It is guarded and rate limited exactly like `toggle` and shares its per-port limit (a `toggle` and a `power` of one port count against each other). Every request that reaches the switch, or is turned away by the limit, logs one INFO line through `snmp_switch.views`: `poe <on|off> switch=S port=P from=<client address> ua=<user agent> result=<state, error ... or rate-limited Ns>`. The client address is nginx's `X-Real-IP` (the peer it saw), else `REMOTE_ADDR`; the user agent is cut to 200 characters with control characters removed.
+`/snmp/power` takes `{"port": ..., "switch": ..., "on": true|false}` (`on` must be a JSON boolean, else 400) and sets that port on or off, with no cycle. It answers `{"state": "on"|"off", "next_in": <seconds>}`, `next_in` being how long the port is now held (the page counts it down). It is guarded exactly like `toggle` and shares its per-port hold (a `toggle` and a `power` of one port count against each other). Every request that reaches the switch, or is turned away by the limit, logs one INFO line through `snmp_switch.views`: `poe <on|off> switch=S port=P from=<client address> ua=<user agent> result=<state, error ... or rate-limited Ns>`. The client address is nginx's `X-Real-IP` (the peer it saw), else `REMOTE_ADDR`; the user agent is cut to 200 characters with control characters removed.
 
 The access-port bound needs the switches file, so it exists on the per-port-VLAN scheme only. The legacy single switch has no description of its ports: there the policy alone decides. The switches file has no notion of a service port: one inside the access range is treated like any other access port (accepted only if the policy offers it).
 

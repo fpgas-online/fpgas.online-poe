@@ -14,7 +14,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from netgear_switch.errors import NetgearSwitchError
 
-from snmp_switch.policy import port_policy, release_toggle_claim, seconds_until_toggle_allowed
+from snmp_switch.policy import hold_after, port_policy, release_toggle_claim, seconds_until_toggle_allowed
 from snmp_switch.release import start_release
 from snmp_switch.switches import PoeConfigError, PoeNotABoardPort, PoeRequestError, open_port, requested_port
 from switch_setup.plan import hostname
@@ -125,9 +125,9 @@ def status(ref):
 
 @poe_view
 def toggle(ref):
-    # turn the port off and on again, at most once per interval
+    # turn the port off and on again; a cycle ends on, so it holds the port as a switch on does
 
-    wait = seconds_until_toggle_allowed(ref)
+    wait = seconds_until_toggle_allowed(ref, leaves_on=True)
     if wait:
         response = JsonResponse(
             {'error': f'{ref} was power-cycled a moment ago; try again in {wait} seconds. '
@@ -235,13 +235,14 @@ def log_power(ref, on, request, result):
 
 @poe_view(with_request=True)
 def power(ref, request, body):
-    # switch the port on or off (not a cycle), at most once per interval,
-    # sharing toggle's limit: the dashboard's PoE switch
+    # switch the port on or off (not a cycle), sharing toggle's per-port
+    # claim: the dashboard's PoE switch. The answer says how long the port is
+    # now held (`next_in`, seconds), so the page can count it down.
     on = body.get('on')
     if not isinstance(on, bool):
         raise PoeRequestError("'on' must be true or false")
 
-    wait = seconds_until_toggle_allowed(ref)
+    wait = seconds_until_toggle_allowed(ref, leaves_on=on)
     if wait:
         log_power(ref, on, request, f'rate-limited {wait}s')
         response = JsonResponse(
@@ -265,4 +266,4 @@ def power(ref, request, body):
     notify_dcws(ref, "set", state)
     if not on and state == "off":
         release_lease(ref, "power-off")
-    return JsonResponse({'state': state})
+    return JsonResponse({'state': state, 'next_in': hold_after(on)})

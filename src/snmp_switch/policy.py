@@ -15,12 +15,23 @@ closed: a project that has not configured them gets every request refused
 
 ``SNMP_SWITCH_RATE_LIMIT_CACHE``
     Alias (in ``CACHES``) of the cache that remembers when each port was last
-    power-cycled. It must be shared by every process that serves the views
+    switched. It must be shared by every process that serves the views
     (redis, memcached, the database): a per-process cache would let each
-    worker allow its own cycle.
+    worker allow its own switch.
 
-``SNMP_SWITCH_TOGGLE_INTERVAL``
-    Seconds between two power cycles of one port. Optional; 60 when unset.
+``SNMP_SWITCH_ON_AFTER_OFF``
+    Seconds after a port was switched off before it may be switched again
+    (that is, back on). Optional; 10 when unset.
+
+``SNMP_SWITCH_OFF_AFTER_ON``
+    Seconds after a port was switched on, or power-cycled (which ends on),
+    before it may be switched again (off, or cycled). Optional; 60 when unset.
+
+Tim, 17 Oct 2026: "The time delay between power off to power on should be ~10
+seconds. The time delay from power on -> power off should be ~60 seconds." So
+the wait depends on what was done last, and there is no other limit. The one
+interval for every request that came before (``SNMP_SWITCH_TOGGLE_INTERVAL``)
+is refused by name, so a site still setting it hears about it.
 """
 
 import logging
@@ -37,8 +48,11 @@ log = logging.getLogger(__name__)
 
 PORT_POLICY_SETTING = "SNMP_SWITCH_PORT_POLICY"
 RATE_LIMIT_CACHE_SETTING = "SNMP_SWITCH_RATE_LIMIT_CACHE"
-TOGGLE_INTERVAL_SETTING = "SNMP_SWITCH_TOGGLE_INTERVAL"
-DEFAULT_TOGGLE_INTERVAL = 60
+ON_AFTER_OFF_SETTING = "SNMP_SWITCH_ON_AFTER_OFF"
+OFF_AFTER_ON_SETTING = "SNMP_SWITCH_OFF_AFTER_ON"
+DEFAULT_ON_AFTER_OFF = 10
+DEFAULT_OFF_AFTER_ON = 60
+RETIRED_INTERVAL_SETTING = "SNMP_SWITCH_TOGGLE_INTERVAL"
 
 
 def port_policy():
@@ -56,25 +70,39 @@ def port_policy():
             f"PoE control is refused: {PORT_POLICY_SETTING} names nothing that can be imported") from e
 
 
-def toggle_interval():
-    interval = getattr(settings, TOGGLE_INTERVAL_SETTING, DEFAULT_TOGGLE_INTERVAL)
-    if isinstance(interval, bool) or not isinstance(interval, int) or interval < 1:
-        raise PoeConfigError(f"PoE control is refused: {TOGGLE_INTERVAL_SETTING} must be a whole number of seconds, 1 or more")
-    return interval
+def _seconds(setting, default):
+    value = getattr(settings, setting, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise PoeConfigError(f"PoE control is refused: {setting} must be a whole number of seconds, 1 or more")
+    return value
+
+
+def hold_after(on):
+    """Seconds a port is held after it was left `on` (True: switched on, or power-cycled) or off (False)."""
+    if hasattr(settings, RETIRED_INTERVAL_SETTING):
+        raise PoeConfigError(
+            f"PoE control is refused: {RETIRED_INTERVAL_SETTING} is no longer read; the wait depends on what was "
+            f"done last: set {ON_AFTER_OFF_SETTING} and {OFF_AFTER_ON_SETTING} instead")
+    if on:
+        return _seconds(OFF_AFTER_ON_SETTING, DEFAULT_OFF_AFTER_ON)
+    return _seconds(ON_AFTER_OFF_SETTING, DEFAULT_ON_AFTER_OFF)
 
 
 def _claim_key(ref):
     return f"snmp_switch:toggle:{'legacy' if ref.switch is None else ref.switch}:{ref.port}"
 
 
-def seconds_until_toggle_allowed(ref):
-    """Claim this port's one power cycle per interval. 0 when the claim was
-    taken (go ahead), otherwise the seconds until the port may be cycled
-    again. The claim is taken in one atomic step (cache.add), so of two
-    requests that arrive together only one goes ahead. The view gives it
-    back (release_toggle_claim) when the switch did not carry the power
-    cycle out."""
-    interval = toggle_interval()
+def seconds_until_toggle_allowed(ref, leaves_on):
+    """Claim this port for a request that leaves it on (`leaves_on`: a switch
+    on, or a power cycle) or off. 0 when the claim was taken (go ahead),
+    otherwise the seconds until the port may be switched again. The claim
+    holds the port for hold_after(leaves_on): what was done last decides how
+    long the next request waits. It is taken in one atomic step (cache.add),
+    so of two requests that arrive together only one goes ahead. The view
+    gives it back (release_toggle_claim) when the switch did not carry the
+    request out."""
+    hold = hold_after(leaves_on)
+    longest = max(hold_after(True), hold_after(False))
     alias = getattr(settings, RATE_LIMIT_CACHE_SETTING, None)
     if not alias:
         raise PoeConfigError(
@@ -84,7 +112,7 @@ def seconds_until_toggle_allowed(ref):
     now = time.time()
     try:
         cache = caches[alias]
-        if cache.add(key, now + interval, timeout=interval):
+        if cache.add(key, now + hold, timeout=hold):
             return 0
         until = cache.get(key)
     except Exception as e:
@@ -92,8 +120,8 @@ def seconds_until_toggle_allowed(ref):
         log.exception("the power-cycle rate limit store (cache %r) failed", alias)
         raise PoeConfigError("PoE control is refused: the power-cycle rate limit store is not answering") from e
     # the claim that beat this request may expire between add() and get()
-    # (and never tell anyone to wait longer than the interval, whatever is stored)
-    return min(interval, max(1, math.ceil(until - now))) if isinstance(until, (int, float)) else 1
+    # (and never tell anyone to wait longer than the longest hold, whatever is stored)
+    return min(longest, max(1, math.ceil(until - now))) if isinstance(until, (int, float)) else 1
 
 
 def release_toggle_claim(ref):
