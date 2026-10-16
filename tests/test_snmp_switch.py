@@ -305,7 +305,7 @@ def test_legacy_scheme_has_no_switch_to_name(legacy_switch):
     assert legacy_switch == []
 
 
-# --- one power cycle per port per interval --------------------------------
+# --- a port is held after each switch: one request at a time ---------------
 
 
 def test_a_second_toggle_inside_the_interval_is_a_429_and_the_switch_is_left_alone(switch_2, monkeypatch):
@@ -317,15 +317,15 @@ def test_a_second_toggle_inside_the_interval_is_a_429_and_the_switch_is_left_alo
     r = post("/toggle", {"port": str(PORT), "switch": 2})
     assert r.status_code == 429
     assert 1 <= int(r["Retry-After"]) <= 60
-    assert (f"switch 2 port {PORT} was power-cycled a moment ago; try again in {r['Retry-After']} seconds"
+    assert (f"switch 2 port {PORT} was switched a moment ago; try again in {r['Retry-After']} seconds"
             in r.json()["error"])
     assert sets == [False, True]
     assert switch_2.state.poe[PORT].admin is True
 
 
-def test_retry_after_is_never_longer_than_the_interval(legacy_switch):
-    """Whatever the store holds (an interval since shortened, a clock that
-    moved), nobody is told to wait longer than the interval."""
+def test_retry_after_is_never_longer_than_the_hold(legacy_switch):
+    """Whatever the store holds (a hold since shortened, a clock that
+    moved), nobody is told to wait longer than the longest hold."""
     caches["poe-rate-limit"].add("snmp_switch:toggle:legacy:9", time.time() + 86400, timeout=60)
     r = post("/toggle", {"port": "9"})
     assert r.status_code == 429
@@ -427,12 +427,61 @@ def test_the_interval_is_per_port(legacy_switch):
     assert post("/toggle", {"port": "9"}).status_code == 429
 
 
-def test_a_port_can_be_cycled_again_after_the_interval(legacy_switch):
-    with override_settings(SNMP_SWITCH_TOGGLE_INTERVAL=1):
+def test_a_port_can_be_cycled_again_after_the_hold(legacy_switch):
+    with override_settings(SNMP_SWITCH_OFF_AFTER_ON=1):
         assert post("/toggle", {"port": "9"}).status_code == 200
         assert post("/toggle", {"port": "9"}).status_code == 429
         time.sleep(1.1)
         assert post("/toggle", {"port": "9"}).status_code == 200
+
+
+# --- Tim, 17 Oct 2026: off -> on ~10 s, on -> off ~60 s, no other limit -----------------------
+
+
+def test_the_defaults_are_tims_ten_seconds_after_off_and_sixty_after_on(legacy_switch):
+    r = power({"port": 9, "on": False})
+    assert r.json() == {"state": "off", "next_in": 10}
+    r = power({"port": 9, "on": True})
+    assert r.status_code == 429 and 1 <= int(r["Retry-After"]) <= 10
+    caches["poe-rate-limit"].clear()
+    r = power({"port": 9, "on": True})
+    assert r.json() == {"state": "on", "next_in": 60}
+    r = power({"port": 9, "on": False})
+    assert r.status_code == 429 and 10 < int(r["Retry-After"]) <= 60
+
+
+def test_after_off_the_port_can_be_switched_on_once_the_short_hold_is_over(legacy_switch):
+    with override_settings(SNMP_SWITCH_ON_AFTER_OFF=1, SNMP_SWITCH_OFF_AFTER_ON=3600):
+        assert power({"port": 9, "on": False}).json() == {"state": "off", "next_in": 1}
+        assert power({"port": 9, "on": True}).status_code == 429
+        time.sleep(1.1)
+        assert power({"port": 9, "on": True}).json() == {"state": "on", "next_in": 3600}
+        r = power({"port": 9, "on": False})
+        assert r.status_code == 429 and int(r["Retry-After"]) > 3500
+    assert legacy_switch == [("set", "9", "2"), ("set", "9", "1")]
+
+
+def test_a_reset_holds_the_port_as_a_switch_on_does(legacy_switch):
+    with override_settings(SNMP_SWITCH_ON_AFTER_OFF=1, SNMP_SWITCH_OFF_AFTER_ON=3600):
+        assert post("/toggle", {"port": "9"}).status_code == 200
+        time.sleep(1.1)
+        r = power({"port": 9, "on": False})
+    assert r.status_code == 429 and int(r["Retry-After"]) > 3500
+
+
+def test_retry_after_is_never_longer_than_the_longest_hold(legacy_switch):
+    caches["poe-rate-limit"].add("snmp_switch:toggle:legacy:9", time.time() + 86400, timeout=60)
+    with override_settings(SNMP_SWITCH_ON_AFTER_OFF=5, SNMP_SWITCH_OFF_AFTER_ON=7):
+        r = power({"port": 9, "on": True})
+    assert r.status_code == 429 and r["Retry-After"] == "7"
+
+
+def test_the_retired_single_interval_is_refused_by_name(legacy_switch):
+    with override_settings(SNMP_SWITCH_TOGGLE_INTERVAL=60):
+        r = power({"port": 9, "on": False})
+    assert r.status_code == 503
+    assert "SNMP_SWITCH_TOGGLE_INTERVAL is no longer read" in r.json()["error"]
+    assert legacy_switch == []
 
 
 def test_status_is_not_rate_limited(legacy_switch):
@@ -451,9 +500,11 @@ def test_a_refused_port_takes_no_ones_turn(legacy_switch):
 
 @pytest.mark.parametrize("broken, reason", [
     ({"SNMP_SWITCH_RATE_LIMIT_CACHE": None}, "SNMP_SWITCH_RATE_LIMIT_CACHE is not set"),
-    ({"SNMP_SWITCH_RATE_LIMIT_CACHE": "no-such-cache"}, "rate limit store is not answering"),
-    ({"SNMP_SWITCH_TOGGLE_INTERVAL": 0}, "SNMP_SWITCH_TOGGLE_INTERVAL must be"),
-    ({"SNMP_SWITCH_TOGGLE_INTERVAL": None}, "SNMP_SWITCH_TOGGLE_INTERVAL must be"),
+    ({"SNMP_SWITCH_RATE_LIMIT_CACHE": "no-such-cache"}, "the store of the ports' holds is not answering"),
+    ({"SNMP_SWITCH_ON_AFTER_OFF": 0}, "SNMP_SWITCH_ON_AFTER_OFF must be"),
+    ({"SNMP_SWITCH_ON_AFTER_OFF": None}, "SNMP_SWITCH_ON_AFTER_OFF must be"),
+    ({"SNMP_SWITCH_OFF_AFTER_ON": True}, "SNMP_SWITCH_OFF_AFTER_ON must be"),
+    ({"SNMP_SWITCH_OFF_AFTER_ON": 1.5}, "SNMP_SWITCH_OFF_AFTER_ON must be"),
 ])
 def test_toggle_without_a_working_rate_limit_is_refused(legacy_switch, broken, reason):
     """Fail closed: no limit store, or one that cannot be asked, is not
@@ -533,7 +584,7 @@ def test_a_json_post_from_anywhere_but_our_own_pages_is_refused(switch_2_untouch
 def test_the_sites_own_fetch_and_a_tool_on_the_host_get_through(switch_2, site):
     """Our pages' fetch (same-origin, JSON) and a direct call with no Sec-Fetch-Site reach the policy and the switch."""
     r = Client().post("/power", BODY, content_type="application/json; charset=UTF-8", **site)
-    assert (r.status_code, r.json()) == (200, {"state": "off"})
+    assert (r.status_code, r.json()) == (200, {"state": "off", "next_in": 10})
     assert switch_2.state.poe[3].admin is False
 
 
@@ -566,17 +617,17 @@ def poe_lines(caplog):
 def test_off_then_on_sets_the_port(switch_2, monkeypatch):
     assert switch_2.state.poe[PORT].admin is True
     r = power({"switch": 2, "port": PORT, "on": False})
-    assert (r.status_code, r.json()) == (200, {"state": "off"})
+    assert (r.status_code, r.json()) == (200, {"state": "off", "next_in": 10})
     assert switch_2.state.poe[PORT].admin is False
     caches["poe-rate-limit"].clear()
     r = power({"switch": 2, "port": str(PORT), "on": True})
-    assert (r.status_code, r.json()) == (200, {"state": "on"})
+    assert (r.status_code, r.json()) == (200, {"state": "on", "next_in": 60})
     assert switch_2.state.poe[PORT].admin is True
 
 
 def test_the_legacy_switch_is_set_too(legacy_switch):
     r = power({"port": 9, "on": False})
-    assert (r.status_code, r.json()) == (200, {"state": "off"})
+    assert (r.status_code, r.json()) == (200, {"state": "off", "next_in": 10})
     assert legacy_switch == [("set", "9", "2")]
 
 
@@ -811,10 +862,10 @@ def test_a_reset_releases_the_ports_lease(switch_2, no_release, monkeypatch):
 
 
 def test_switching_off_releases_and_switching_on_does_not(switch_2, no_release):
-    assert post("/power", {"switch": 2, "port": PORT, "on": False}).json() == {"state": "off"}
+    assert post("/power", {"switch": 2, "port": PORT, "on": False}).json() == {"state": "off", "next_in": 10}
     assert no_release == [(2, PORT, "power-off")]
     caches["poe-rate-limit"].clear()  # the off took this port's turn
-    assert post("/power", {"switch": 2, "port": PORT, "on": True}).json() == {"state": "on"}
+    assert post("/power", {"switch": 2, "port": PORT, "on": True}).json() == {"state": "on", "next_in": 60}
     assert no_release == [(2, PORT, "power-off")]
 
 
@@ -860,8 +911,17 @@ def test_a_reset_whose_off_failed_releases_nothing(scripted, no_release):
 
 def test_an_off_the_switch_answers_on_releases_nothing(scripted, no_release):
     scripted("on")
-    assert post("/power", {"switch": 2, "port": PORT, "on": False}).json() == {"state": "on"}
+    assert post("/power", {"switch": 2, "port": PORT, "on": False}).json() == {"state": "on", "next_in": 0}
     assert no_release == []
+    # the port is as it was, so it is not held: the off can be tried again at once
+    assert post("/power", {"switch": 2, "port": PORT, "on": False}).status_code == 200
+
+
+def test_an_on_the_switch_answers_off_holds_nothing(scripted, no_release):
+    scripted("off")
+    assert post("/power", {"switch": 2, "port": PORT, "on": True}).json() == {"state": "off", "next_in": 0}
+    # the port is as it was, so it is not held: the on can be tried again at once
+    assert post("/power", {"switch": 2, "port": PORT, "on": True}).status_code == 200
 
 
 def test_the_legacy_switch_has_no_lease_to_release(legacy_switch, no_release):
