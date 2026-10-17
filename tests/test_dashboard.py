@@ -543,7 +543,8 @@ def test_an_entry_this_code_cannot_read_is_a_miss(head, cache, clock, reads):
 
 def test_an_entry_cached_before_the_vlan_fields_still_reads():
     old = {"index": 1, "name": "n", "model": "m", "reachable": True, "error": "", "read_at": "2026-10-09T12:00:00+09:30",
-           "good_at": None, "ports": [{"port": 1, "label": "x", "admin_enabled": True, "link_up": True}]}
+           "good_at": None, "ports": [{"port": 1, "label": "x", "admin_enabled": True, "poe_admin_enabled": True,
+                                       "link_up": True}]}
     view = dashboard._from_dict(old)
     assert view.vlans == [] and view.ports[0].pvid is None
     assert view.ports[0].untagged_vlans == [] and view.ports[0].tagged_vlans == []
@@ -555,6 +556,40 @@ def test_an_entry_cached_before_the_admin_state_is_a_miss():
     old = {"index": 1, "name": "n", "model": "m", "reachable": True, "error": "", "read_at": "2026-10-09T12:00:00+09:30",
            "good_at": None, "ports": [{"port": 1, "label": "x", "link_up": True}]}
     assert dashboard._from_dict(old) is None
+
+
+def test_an_entry_cached_before_the_poe_admin_state_is_a_miss():
+    """A power button follows the PoE admin state (fpgas.online-site #170); an entry without it would draw every port
+    as switched on for one cache period. Read afresh instead."""
+    old = {"index": 1, "name": "n", "model": "m", "reachable": True, "error": "", "read_at": "2026-10-09T12:00:00+09:30",
+           "good_at": None, "ports": [{"port": 1, "label": "x", "admin_enabled": True, "link_up": True}]}
+    assert dashboard._from_dict(old) is None
+
+
+def test_a_port_carries_its_poe_admin_state_apart_from_detection():
+    """Right after PoE is switched off the detection status still says "searching" for a few seconds: the admin state
+    is what the switch was told, and what a power button shows (fpgas.online-site #170)."""
+    from netgear_switch.models import PoEDetect, PoEStatus, PortStatus
+
+    ifs = [PortStatus(port=n, name=f"1/0/{n}", admin_enabled=True, link_up=False, speed_mbps=None) for n in (1, 2, 3)]
+    poe = [PoEStatus(port=1, admin_enabled=False, detect=PoEDetect.SEARCHING, power_mw=0),
+           PoEStatus(port=2, admin_enabled=True, detect=PoEDetect.DISABLED, power_mw=0)]
+    views = dashboard._build_ports(ifs, poe, None, None, None, port_count=52)
+    assert [(v.port, v.poe_admin_enabled, v.poe_state) for v in views] == [
+        (1, False, "searching"), (2, True, "disabled"), (3, None, None)]
+
+
+def test_poe_switched_off_at_the_switch_reads_as_such(monkeypatch, tmp_path):
+    vs = VirtualSwitch("gsm7228ps", community=COMMUNITY)
+    vs.state.poe[5].admin = False
+    vs.start()
+    try:
+        configure(monkeypatch, tmp_path, (2, "s3300", vs))
+        (view,) = dashboard.read_all()
+    finally:
+        vs.stop()
+    ports = {p.port: p for p in view.ports}
+    assert ports[5].poe_admin_enabled is False and ports[6].poe_admin_enabled is True
 
 
 def test_a_port_disabled_at_the_switch_reads_as_such(monkeypatch, tmp_path):
