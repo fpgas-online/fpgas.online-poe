@@ -632,6 +632,18 @@ def test_only_front_panel_ports_are_shown():
     assert [v.port for v in views] == [1, 52]
 
 
+def test_a_port_carries_the_switch_s_oper_status_code():
+    # the site's Link badge is red for a link fault, a code neither up (1) nor down (2) (Tim, 17 Oct 2026: "Link fault
+    # only"); a backend that cannot tell gives None
+    from netgear_switch.models import PortStatus
+
+    ifs = [PortStatus(port=n, name=f"1/0/{n}", admin_enabled=True, link_up=code == 1, speed_mbps=1000, oper_status=code)
+           for n, code in ((1, 1), (2, 2), (3, 7), (4, None))]
+    views = dashboard._build_ports(ifs, None, None, None, None, port_count=52)
+    assert [(v.port, v.oper_status, v.link_up) for v in views] == [(1, 1, True), (2, 2, False), (3, 7, False),
+                                                                  (4, None, False)]
+
+
 def test_a_switch_whose_ports_cannot_be_built_does_not_hide_the_others(monkeypatch, tmp_path):
     one, two = serve("gsm7252ps"), serve("gsm7228ps")
     try:

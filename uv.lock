@@ -159,7 +159,7 @@ requires-dist = [
     { name = "django" },
     { name = "paho-mqtt", specifier = ">=2" },
     { name = "pysnmp" },
-    { name = "python-netgear-switch-library" },
+    { name = "python-netgear-switch-library", specifier = ">=0.1.post29" },
     { name = "pyyaml" },
 ]
 provides-extras = ["cli"]
@@ -260,14 +260,14 @@ wheels = [
 
 [[package]]
 name = "python-netgear-switch-library"
-version = "0.0.post405"
+version = "0.1.post29"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/eb/51/1c4d6df0b80d9dd71ab2cd05f98ffeedc2d84c778ee079996f13033deae4/python_netgear_switch_library-0.0.post405.tar.gz", hash = "sha256:8177c3944b12542c208ebefd10c42197c123c687bb9dc2f270a9c5cfa349170c", size = 1972858, upload-time = "2026-08-13T02:40:52.122Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a4/fe/6d7be21aa4d3fde43bfa43b72dbcb6b474bf8ed920980fef5abc407825be/python_netgear_switch_library-0.1.post29.tar.gz", hash = "sha256:7082598a3435f34e9ba2647a0c7d70c3a2c157beaa23c434d9fa01c6dee5744a", size = 1974548, upload-time = "2026-10-17T07:13:39.112Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f5/f4/afa331fb618ec3df66cb0218567360016e7b394e56b854c5105177c4b8e7/python_netgear_switch_library-0.0.post405-py3-none-any.whl", hash = "sha256:5cc013fdf39efd32f98676e0a943830812b2ebcd9ade18b72ae6cfc2cebb4b05", size = 503846, upload-time = "2026-08-13T02:40:50.073Z" },
+    { url = "https://files.pythonhosted.org/packages/bf/70/adc423ceb866707b683664987ae7349ec39b04479099aa74320204518b46/python_netgear_switch_library-0.1.post29-py3-none-any.whl", hash = "sha256:093f5d2828f1e89440db262ac7d2825a05c5e7eecaf0e8178f2628a534718479", size = 505370, upload-time = "2026-10-17T07:13:37.164Z" },
 ]
 
 [[package]]

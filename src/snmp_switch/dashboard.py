@@ -78,6 +78,10 @@ class PortView:
     # it carries no link whatever is plugged in (the dashboard's link badge, which also switches it)
     admin_enabled: bool = True
     link_up: bool = False
+    # the port's IF-MIB ifOperStatus code (1 up, 2 down, 3 testing, 4 unknown, 5 dormant, 6 notPresent, 7
+    # lowerLayerDown), as netgear_switch's PortStatus.oper_status gives it; None where the backend cannot tell. The
+    # dashboard's Link badge is red for a link fault: a code that is neither up nor down (Tim, 17 Oct 2026)
+    oper_status: int | None = None
     speed_mbps: int | None = None
     # "disabled", "searching", "delivering", "fault" or "other"; None when the
     # port has no PoE
@@ -199,7 +203,7 @@ def _build_ports(ports, poe, stats, lldp, macs, port_count, pvids=None, vlans=No
     views = []
     for p in sorted((p for p in ports if 1 <= p.port <= port_count), key=lambda p: p.port):
         v = PortView(port=p.port, label=p.description, admin_enabled=p.admin_enabled, link_up=p.link_up,
-                     speed_mbps=p.speed_mbps if p.link_up else None)
+                     oper_status=p.oper_status, speed_mbps=p.speed_mbps if p.link_up else None)
         if p.port in poe:
             v.poe_state = _POE_STATES.get(poe[p.port].detect, "other")
             v.poe_watts = _poe_watts(poe[p.port])

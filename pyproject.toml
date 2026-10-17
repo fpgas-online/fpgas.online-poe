@@ -21,7 +21,8 @@ classifiers = [
 dependencies=[
     'pysnmp',
     'django',
-    'python-netgear-switch-library',
+    # PortStatus.oper_status (the Link badge's link fault, round 5b)
+    'python-netgear-switch-library>=0.1.post29',
     'pyyaml',
     "channels>=4.3.2",
     "paho-mqtt>=2",
