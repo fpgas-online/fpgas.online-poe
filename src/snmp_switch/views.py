@@ -3,6 +3,7 @@ import json
 import logging
 import time
 import unicodedata
+from datetime import datetime
 
 from asgiref.sync import async_to_sync
 
@@ -226,6 +227,14 @@ def client_agent(request):
     return _printable(request.META.get('HTTP_USER_AGENT', ''), MAX_UA) or '-'
 
 
+def confirmed_at():
+    """Now, as ISO 8601 with the offset: the `at` of a power or link answer, taken once the switch has been written
+    and read back. A dashboard reading (SwitchView.read_at, stamped when the read starts) that started after it shows
+    the change, so the page keeps what the switch confirmed until such a reading arrives (fpgas.online-site's
+    power-button.js; the hold wart of round 5b)."""
+    return datetime.now().astimezone().isoformat()
+
+
 def log_power(ref, on, request, result):
     """The one INFO line for a power request: there is no login, so who is
     the client address and what it said it was."""
@@ -272,7 +281,7 @@ def power(ref, request, body):
         # the switch did not take it: the port is as it was, so it is not held, and can be tried again at once
         release_toggle_claim(ref)
         hold = 0
-    return JsonResponse({'state': state, 'next_in': hold})
+    return JsonResponse({'state': state, 'next_in': hold, 'at': confirmed_at()})
 
 
 def log_link(ref, enabled, request, result):
@@ -323,4 +332,4 @@ def link(ref, request, body):
     if state != ("enabled" if enabled else "disabled"):
         release_toggle_claim(ref, kind="link")
         hold = 0
-    return JsonResponse({'link': state, 'next_in': hold})
+    return JsonResponse({'link': state, 'next_in': hold, 'at': confirmed_at()})

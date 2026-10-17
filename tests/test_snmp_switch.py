@@ -13,6 +13,7 @@ import os
 import textwrap
 import time
 import types
+from datetime import datetime
 
 import pytest
 from asgiref.sync import async_to_sync
@@ -32,6 +33,15 @@ OTHER_PORT = 4  # an access port like PORT, but not one the site offers
 # what write_switches() below says of every switch: not access ports at all
 TRUNK_PORT = 51
 UPLINK_PORT = 52
+
+
+def confirmed(response):
+    """A power or link answer's body without its `at`, after checking `at` is an ISO 8601 time with its offset taken
+    while the request ran (the page compares it with the dashboard reading's start)."""
+    body = response.json()
+    at = datetime.fromisoformat(body.pop("at"))
+    assert at.tzinfo is not None and abs((datetime.now().astimezone() - at).total_seconds()) < 60, at
+    return body
 
 
 def post(path, body):
@@ -440,22 +450,22 @@ def test_a_port_can_be_cycled_again_after_the_hold(legacy_switch):
 
 def test_the_defaults_are_tims_ten_seconds_after_off_and_sixty_after_on(legacy_switch):
     r = power({"port": 9, "on": False})
-    assert r.json() == {"state": "off", "next_in": 10}
+    assert confirmed(r) == {"state": "off", "next_in": 10}
     r = power({"port": 9, "on": True})
     assert r.status_code == 429 and 1 <= int(r["Retry-After"]) <= 10
     caches["poe-rate-limit"].clear()
     r = power({"port": 9, "on": True})
-    assert r.json() == {"state": "on", "next_in": 60}
+    assert confirmed(r) == {"state": "on", "next_in": 60}
     r = power({"port": 9, "on": False})
     assert r.status_code == 429 and 10 < int(r["Retry-After"]) <= 60
 
 
 def test_after_off_the_port_can_be_switched_on_once_the_short_hold_is_over(legacy_switch):
     with override_settings(SNMP_SWITCH_ON_AFTER_OFF=1, SNMP_SWITCH_OFF_AFTER_ON=3600):
-        assert power({"port": 9, "on": False}).json() == {"state": "off", "next_in": 1}
+        assert confirmed(power({"port": 9, "on": False})) == {"state": "off", "next_in": 1}
         assert power({"port": 9, "on": True}).status_code == 429
         time.sleep(1.1)
-        assert power({"port": 9, "on": True}).json() == {"state": "on", "next_in": 3600}
+        assert confirmed(power({"port": 9, "on": True})) == {"state": "on", "next_in": 3600}
         r = power({"port": 9, "on": False})
         assert r.status_code == 429 and int(r["Retry-After"]) > 3500
     assert legacy_switch == [("set", "9", "2"), ("set", "9", "1")]
@@ -584,7 +594,7 @@ def test_a_json_post_from_anywhere_but_our_own_pages_is_refused(switch_2_untouch
 def test_the_sites_own_fetch_and_a_tool_on_the_host_get_through(switch_2, site):
     """Our pages' fetch (same-origin, JSON) and a direct call with no Sec-Fetch-Site reach the policy and the switch."""
     r = Client().post("/power", BODY, content_type="application/json; charset=UTF-8", **site)
-    assert (r.status_code, r.json()) == (200, {"state": "off", "next_in": 10})
+    assert (r.status_code, confirmed(r)) == (200, {"state": "off", "next_in": 10})
     assert switch_2.state.poe[3].admin is False
 
 
@@ -617,17 +627,17 @@ def poe_lines(caplog):
 def test_off_then_on_sets_the_port(switch_2, monkeypatch):
     assert switch_2.state.poe[PORT].admin is True
     r = power({"switch": 2, "port": PORT, "on": False})
-    assert (r.status_code, r.json()) == (200, {"state": "off", "next_in": 10})
+    assert (r.status_code, confirmed(r)) == (200, {"state": "off", "next_in": 10})
     assert switch_2.state.poe[PORT].admin is False
     caches["poe-rate-limit"].clear()
     r = power({"switch": 2, "port": str(PORT), "on": True})
-    assert (r.status_code, r.json()) == (200, {"state": "on", "next_in": 60})
+    assert (r.status_code, confirmed(r)) == (200, {"state": "on", "next_in": 60})
     assert switch_2.state.poe[PORT].admin is True
 
 
 def test_the_legacy_switch_is_set_too(legacy_switch):
     r = power({"port": 9, "on": False})
-    assert (r.status_code, r.json()) == (200, {"state": "off", "next_in": 10})
+    assert (r.status_code, confirmed(r)) == (200, {"state": "off", "next_in": 10})
     assert legacy_switch == [("set", "9", "2")]
 
 
@@ -862,10 +872,10 @@ def test_a_reset_releases_the_ports_lease(switch_2, no_release, monkeypatch):
 
 
 def test_switching_off_releases_and_switching_on_does_not(switch_2, no_release):
-    assert post("/power", {"switch": 2, "port": PORT, "on": False}).json() == {"state": "off", "next_in": 10}
+    assert confirmed(post("/power", {"switch": 2, "port": PORT, "on": False})) == {"state": "off", "next_in": 10}
     assert no_release == [(2, PORT, "power-off")]
     caches["poe-rate-limit"].clear()  # the off took this port's turn
-    assert post("/power", {"switch": 2, "port": PORT, "on": True}).json() == {"state": "on", "next_in": 60}
+    assert confirmed(post("/power", {"switch": 2, "port": PORT, "on": True})) == {"state": "on", "next_in": 60}
     assert no_release == [(2, PORT, "power-off")]
 
 
@@ -911,7 +921,7 @@ def test_a_reset_whose_off_failed_releases_nothing(scripted, no_release):
 
 def test_an_off_the_switch_answers_on_releases_nothing(scripted, no_release):
     scripted("on")
-    assert post("/power", {"switch": 2, "port": PORT, "on": False}).json() == {"state": "on", "next_in": 0}
+    assert confirmed(post("/power", {"switch": 2, "port": PORT, "on": False})) == {"state": "on", "next_in": 0}
     assert no_release == []
     # the port is as it was, so it is not held: the off can be tried again at once
     assert post("/power", {"switch": 2, "port": PORT, "on": False}).status_code == 200
@@ -919,7 +929,7 @@ def test_an_off_the_switch_answers_on_releases_nothing(scripted, no_release):
 
 def test_an_on_the_switch_answers_off_holds_nothing(scripted, no_release):
     scripted("off")
-    assert post("/power", {"switch": 2, "port": PORT, "on": True}).json() == {"state": "off", "next_in": 0}
+    assert confirmed(post("/power", {"switch": 2, "port": PORT, "on": True})) == {"state": "off", "next_in": 0}
     # the port is as it was, so it is not held: the on can be tried again at once
     assert post("/power", {"switch": 2, "port": PORT, "on": True}).status_code == 200
 
@@ -943,7 +953,7 @@ def link_lines(caplog):
 def test_disable_then_enable_sets_the_ports_admin_state(switch_2):
     assert switch_2.state.ports[PORT].admin is True
     r = link({"switch": 2, "port": PORT, "enabled": False})
-    assert (r.status_code, r.json()) == (200, {"link": "disabled", "next_in": 10})
+    assert (r.status_code, confirmed(r)) == (200, {"link": "disabled", "next_in": 10})
     assert switch_2.state.ports[PORT].admin is False
     # the short hold: enabling it again inside it is a 429 that names the link, and nothing is sent
     r = link({"switch": 2, "port": PORT, "enabled": True})
@@ -951,7 +961,7 @@ def test_disable_then_enable_sets_the_ports_admin_state(switch_2):
     assert switch_2.state.ports[PORT].admin is False
     caches["poe-rate-limit"].clear()
     r = link({"switch": 2, "port": PORT, "enabled": True})
-    assert (r.status_code, r.json()) == (200, {"link": "enabled", "next_in": 60})
+    assert (r.status_code, confirmed(r)) == (200, {"link": "enabled", "next_in": 60})
     assert switch_2.state.ports[PORT].admin is True
 
 
@@ -1057,7 +1067,7 @@ def test_a_link_write_that_fails_unexpectedly_is_a_json_502_that_names_only_the_
 
 def test_a_link_the_switch_reads_back_unchanged_is_answered_and_holds_nothing(scripted_link):
     scripted_link("enabled")
-    assert link({"switch": 2, "port": PORT, "enabled": False}).json() == {"link": "enabled", "next_in": 0}
+    assert confirmed(link({"switch": 2, "port": PORT, "enabled": False})) == {"link": "enabled", "next_in": 0}
     assert caches["poe-rate-limit"]._cache == {}
 
 
@@ -1070,7 +1080,7 @@ def test_a_port_the_switch_no_longer_lists_is_a_502_not_a_null(scripted_link):
 
 def test_the_sites_own_fetch_switches_the_link(switch_2):
     r = link({"switch": 2, "port": PORT, "enabled": False}, HTTP_SEC_FETCH_SITE="same-origin")
-    assert (r.status_code, r.json()) == (200, {"link": "disabled", "next_in": 10})
+    assert (r.status_code, confirmed(r)) == (200, {"link": "disabled", "next_in": 10})
 
 
 @pytest.mark.parametrize("method", ["get", "put", "delete"])
