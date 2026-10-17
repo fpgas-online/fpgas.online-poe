@@ -86,6 +86,11 @@ class PortView:
     # "disabled", "searching", "delivering", "fault" or "other"; None when the
     # port has no PoE
     poe_state: str | None = None
+    # the port's PoE administrative state (pethPsePortAdminEnable): True when PoE is switched on at the switch, False
+    # when switched off, None when the port has no PoE. This is what /snmp/power writes and answers with; poe_state
+    # is the detection status, which lags an admin write by seconds ("searching" after an off), so a power button
+    # follows this field, not poe_state (fpgas.online-site #170)
+    poe_admin_enabled: bool | None = None
     poe_watts: float | None = None
     lldp_name: str | None = None
     lldp_port: str | None = None
@@ -206,6 +211,7 @@ def _build_ports(ports, poe, stats, lldp, macs, port_count, pvids=None, vlans=No
                      oper_status=p.oper_status, speed_mbps=p.speed_mbps if p.link_up else None)
         if p.port in poe:
             v.poe_state = _POE_STATES.get(poe[p.port].detect, "other")
+            v.poe_admin_enabled = poe[p.port].admin_enabled
             v.poe_watts = _poe_watts(poe[p.port])
         if p.port in stats:
             s = stats[p.port]
@@ -317,9 +323,9 @@ def _from_dict(d):
     """A cached view, or None for an entry this code cannot read (written by
     another version): it is treated as a miss and read afresh. The VLAN fields
     have defaults, so an entry written before they existed still reads. An
-    entry without the ports' admin state is a miss: its default (enabled)
-    would be a guess."""
-    if any("admin_enabled" not in p for p in d.get("ports", ())):
+    entry without the ports' admin state, or without their PoE admin state, is
+    a miss: its default would be a guess."""
+    if any("admin_enabled" not in p or "poe_admin_enabled" not in p for p in d.get("ports", ())):
         return None
     try:
         return SwitchView(**{**d, "ports": [PortView(**p) for p in d["ports"]]})
